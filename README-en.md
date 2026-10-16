@@ -26,7 +26,7 @@ npm run deploy
 
 ### 2. Set an access password
 
-Cloudflare dashboard → your Worker → **Settings → Variables and Secrets** → add:
+If the deploy page shows a `MANAGI_AUTH` field, fill it in there. If you miss it or want to change it later, go to the Cloudflare dashboard → your Worker → **Settings → Variables and Secrets** → add:
 
 | Name | Type | Value |
 | --- | --- | --- |

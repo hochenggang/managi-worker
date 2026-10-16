@@ -15,6 +15,9 @@
       "starter"
     ],
     "bindings": {
+      "MANAGI_AUTH": {
+        "description": "访问口令，格式 `用户名:密码`（例如 `ops:my-long-password`）。**请务必填写**：留空等于不鉴权，任何人拿到你的 Worker 地址都能借它去连你的机器。"
+      },
       "MANAGI_KNOWN_HOSTS": {
         "description": "记录首次连接时信任的 SSH 主机密钥（TOFU），部署时自动创建。",
         "type": "kv_namespace"

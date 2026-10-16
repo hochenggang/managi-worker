@@ -26,7 +26,7 @@ npm run deploy
 
 ### 2. 设访问口令
 
-Cloudflare 控制台 → 你的 Worker → **Settings → Variables and Secrets** → 添加：
+部署页上如果出现了 `MANAGI_AUTH` 输入框，就在那里填上。漏了、或者事后想改，去 Cloudflare 控制台 → 你的 Worker → **Settings → Variables and Secrets** 添加：
 
 | 变量名 | 类型 | 值 |
 | --- | --- | --- |
