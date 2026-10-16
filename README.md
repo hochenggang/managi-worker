@@ -61,7 +61,7 @@ npx wrangler dev --var MANAGI_AUTH:ops:s3cret
 | --- | --- |
 | `npm run dev` | 本地起服务（会先构建前端） |
 | `npm run deploy` | 部署到 Cloudflare |
-| `npm test` | 跑单元测试（435 项，约 5 秒，不需要出网） |
+| `npm test` | 跑单元测试（450+ 项，约 5 秒，不需要出网） |
 | `npm run test:coverage` | 单测 + 覆盖率报告（看 `coverage/index.html`） |
 | `npm run typecheck` | TypeScript 类型检查（源码 + 测试两套配置） |
 | `npm run check` | 类型检查 + 单测 + 试打包 |
@@ -132,5 +132,7 @@ managi-worker/
 
 - **测试跑在 Node 里，不起 workerd** —— 所以不需要出网、不需要有 sshd 可连。被测的是编排逻辑：`cloudflare:sockets` 用 alias 换成桩（唯一触点是 `dial.ts`），`SSHConnection` 与三个通道处理器用 `vi.mock` 整类替换。`src/ssh/**`（逐字保留的协议栈）不计入覆盖率分母，它要真实服务端才有意义。
 - **协议是硬的** —— 前端零改动是前提，别自作主张改字段。控制面（文本帧）`{type, data, seq}`：`seq > 0` 一问一答，`seq = 0` 不等回复或服务端主动推；动词 `open` / `close` / `resize` / `ping` / `pong` / `error` / `ack` / `ls` / `mkdir` / `rm` / `upload` / `upload_end` / `download`。数据面（二进制帧）`[chan: u32 大端][flags: u16 大端][原始字节]`，`FLAG_END = 0x0001` 表示这路流到此结束。
-- **`src/ssh/` 尽量别动** —— 逐字保留的第三方协议栈，改一处会让报文编号对不上。唯一一处刻意的补充是 `sftp.ts` 的 `lstat()`：Go 版删除文件前用 LSTAT 判定类型、不跟随符号链接，少了它，指向目录的软链接会被当目录递归删除，删到链接目标上去。
+- **`src/ssh/` 尽量别动** —— 逐字保留的第三方协议栈，改一处会让报文编号对不上。目前只有两处刻意的补充，都有单测钉住：
+  - `sftp.ts` 的 `lstat()`：Go 版删除文件前用 LSTAT 判定类型、不跟随符号链接，少了它，指向目录的软链接会被当目录递归删除，删到链接目标上去。
+  - `algorithms.ts` 补上 `curve25519-sha256@libssh.org`：它是 `curve25519-sha256` 标准化之前的旧名，RFC 8731 明确二者是同一个算法（同样的 X25519、同样的 SHA-256），但协商是精确字符串匹配，名字对不上就报 `No common 密钥交换算法`。有些服务器（裁剪过的 sshd、非 OpenSSH 实现）只 advertise 旧名。
 - **想同步上游前端** —— 覆盖整个 `frontend/`，再把 `vite.config.ts` 的构建输出改回仓库根的 `./dist`。

@@ -61,7 +61,7 @@ Scripts:
 | --- | --- |
 | `npm run dev` | Local dev server (builds the frontend first) |
 | `npm run deploy` | Deploy to Cloudflare |
-| `npm test` | Unit tests (435 specs, ~5s, no network needed) |
+| `npm test` | Unit tests (450+ specs, ~5s, no network needed) |
 | `npm run test:coverage` | Tests plus a coverage report (`coverage/index.html`) |
 | `npm run typecheck` | TypeScript checks for both the source and the test config |
 | `npm run check` | Typecheck + tests + a dry-run bundle |
@@ -132,5 +132,7 @@ managi-worker/
 
 - **Tests run on Node, not in workerd** — so they need no network access and no reachable sshd. What is exercised is the orchestration logic: `cloudflare:sockets` is aliased to a stub (its only consumer is `dial.ts`), and `SSHConnection` plus the three channel handlers are swapped out wholesale with `vi.mock`. `src/ssh/**` (the verbatim protocol stack) is excluded from the coverage denominator — it only means anything against a real server.
 - **The protocol is fixed** — zero frontend changes is a hard constraint, so don't invent fields. Control plane (text frames) is `{type, data, seq}`: `seq > 0` is request/response, `seq = 0` expects no reply or is a server push. Verbs: `open` / `close` / `resize` / `ping` / `pong` / `error` / `ack` / `ls` / `mkdir` / `rm` / `upload` / `upload_end` / `download`. Data plane (binary frames) is `[chan: u32 BE][flags: u16 BE][raw bytes]`, with `FLAG_END = 0x0001` ending the stream.
-- **Leave `src/ssh/` alone** — it is a verbatim third-party protocol stack, and touching one spot desynchronizes the message numbering. The one deliberate addition is `lstat()` in `sftp.ts`: the Go version uses LSTAT before deleting so it does not follow symlinks, and without it a symlink pointing at a directory is recursively deleted as a directory, wiping the link target.
+- **Leave `src/ssh/` alone** — it is a verbatim third-party protocol stack, and touching one spot desynchronizes the message numbering. There are exactly two deliberate additions so far, both pinned by tests:
+  - `lstat()` in `sftp.ts`: the Go version uses LSTAT before deleting so it does not follow symlinks, and without it a symlink pointing at a directory is recursively deleted as a directory, wiping the link target.
+  - `curve25519-sha256@libssh.org` added to `algorithms.ts`: it is the pre-standardization name of `curve25519-sha256`, and RFC 8731 states the two are the same algorithm (same X25519, same SHA-256). Negotiation is an exact string match though, so a name mismatch fails with `No common ...`. Some servers (trimmed-down sshd, non-OpenSSH implementations) only advertise the old name.
 - **Syncing the upstream frontend** — overwrite all of `frontend/`, then restore the one `vite.config.ts` change that writes the bundle to `./dist` at the repo root.

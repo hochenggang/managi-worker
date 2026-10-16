@@ -1,8 +1,18 @@
 export const KEX_ALGORITHM_CURVE25519_SHA256 = 'curve25519-sha256';
+
+// curve25519-sha256 标准化之前的旧名。RFC 8731 明确它是同一个算法：
+// "the algorithm described is equivalent to the privately defined algorithm
+//  curve25519-sha256@libssh.org"。二者的 X25519 计算与报文格式逐比特相同，
+// 差别只在名字，所以等价于别名 —— 但协商是精确字符串匹配，必须在列表里各列一份。
+// 有些服务器（裁剪过的 sshd、非 OpenSSH 实现）只 advertise 这个名字。
+export const KEX_ALGORITHM_CURVE25519_SHA256_LIBSSH = 'curve25519-sha256@libssh.org';
+
 export const KEX_ALGORITHM_ECDH_NISTP256 = 'ecdh-sha2-nistp256';
 
 export const SUPPORTED_KEX_ALGORITHMS = [
   KEX_ALGORITHM_CURVE25519_SHA256,
+  // 标准名排在前面：两边都支持时优先走标准名，不改变既有偏好顺序。
+  KEX_ALGORITHM_CURVE25519_SHA256_LIBSSH,
   KEX_ALGORITHM_ECDH_NISTP256,
 ];
 
@@ -47,7 +57,8 @@ const MAC_SPECS: Record<string, MacSpec> = {
 };
 
 export function isCurve25519KEXAlgorithm(algorithm: string): boolean {
-  return algorithm === KEX_ALGORITHM_CURVE25519_SHA256;
+  return algorithm === KEX_ALGORITHM_CURVE25519_SHA256
+    || algorithm === KEX_ALGORITHM_CURVE25519_SHA256_LIBSSH;
 }
 
 export function getCipherSpec(algorithm: string): CipherSpec {
