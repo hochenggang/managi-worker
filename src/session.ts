@@ -47,6 +47,7 @@ import {
   getCipherSpec,
   getMacSpec,
   isCurve25519KEXAlgorithm,
+  isEtmMacAlgorithm,
 } from './ssh/algorithms';
 import { ECDHKeyExchange } from './ssh/kex-ecdh';
 import { Curve25519KeyExchange, type Curve25519KeyPair } from './ssh/kex-curve25519';
@@ -351,6 +352,7 @@ export class SSHConnection {
         Boolean(spec?.aead),
         macLength,
         this.verifier ? (d, mac, sequence) => this.verifier!.verify(d, sequence, mac) : undefined,
+        spec !== null && isEtmMacAlgorithm(this.macS2C),
       );
       if (!packet) return;
       await this.handlePacket(packet);
@@ -753,6 +755,7 @@ export class SSHConnection {
         this.sendSequence,
         spec.aead,
         this.signer ? (data, sequence) => this.signer!.sign(data, sequence) : undefined,
+        isEtmMacAlgorithm(this.macC2S),
       );
       this.sendSequence = nextSequenceNumber(this.sendSequence);
       await this.write(packet);
@@ -804,6 +807,7 @@ export class SSHConnection {
         (data, sequence, aad) => this.encryptor!.encrypt(data, sequence, aad),
         this.sendSequence, spec.aead,
         this.signer ? (data, sequence) => this.signer!.sign(data, sequence) : undefined,
+        isEtmMacAlgorithm(this.macC2S),
       );
       this.sendSequence = nextSequenceNumber(this.sendSequence);
       await this.write(packet);

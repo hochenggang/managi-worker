@@ -160,10 +160,13 @@ export class SSHHMAC {
 
   constructor(algorithm: string, rawKey: Uint8Array) {
     this.rawKey = rawKey;
-    if (algorithm === 'hmac-sha2-256') {
+    // ETM 变体与同名非 ETM 用的是**同一个 HMAC**（同样的密钥、同样的哈希），差异只在
+    // 报文分帧：MAC 覆盖密文而不是明文。所以这里把后缀剥掉再判，两个名字归到一处。
+    const base = algorithm.replace('-etm@openssh.com', '');
+    if (base === 'hmac-sha2-256') {
       this.hash = 'SHA-256';
       this.length = 32;
-    } else if (algorithm === 'hmac-sha2-512') {
+    } else if (base === 'hmac-sha2-512') {
       this.hash = 'SHA-512';
       this.length = 64;
     } else {

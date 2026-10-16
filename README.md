@@ -63,6 +63,7 @@ npx wrangler dev --var MANAGI_AUTH:ops:s3cret
 | `npm run deploy` | 部署到 Cloudflare |
 | `npm test` | 跑单元测试（450+ 项，约 5 秒，不需要出网） |
 | `npm run test:coverage` | 单测 + 覆盖率报告（看 `coverage/index.html`） |
+| `npm run test:live` | 拿**真** SSH 服务器跑一次完整握手（需要 `LIVE_SSH_*` 变量，默认跳过） |
 | `npm run typecheck` | TypeScript 类型检查（源码 + 测试两套配置） |
 | `npm run check` | 类型检查 + 单测 + 试打包 |
 
@@ -122,6 +123,7 @@ managi-worker/
 │   ├── types.ts           # SSH 常量、连接配置、Env
 │   └── ssh/               # SSH 协议栈，逐字取自 EdgeSSH
 ├── tests/                 # 单元测试（跑在 Node 里，不起 workerd）
+│   └── live/              # 对真服务器 / 本地 paramiko 服务端的互通验证（默认跳过）
 ├── frontend/              # 前端，与 managi-v3/frontend 逐字节一致（仅 vite.config.ts 改构建输出）
 ├── scripts/build-web.mjs  # 构建前端单文件产物到 ./dist
 ├── wrangler.toml
@@ -132,7 +134,11 @@ managi-worker/
 
 - **测试跑在 Node 里，不起 workerd** —— 所以不需要出网、不需要有 sshd 可连。被测的是编排逻辑：`cloudflare:sockets` 用 alias 换成桩（唯一触点是 `dial.ts`），`SSHConnection` 与三个通道处理器用 `vi.mock` 整类替换。`src/ssh/**`（逐字保留的协议栈）不计入覆盖率分母，它要真实服务端才有意义。
 - **协议是硬的** —— 前端零改动是前提，别自作主张改字段。控制面（文本帧）`{type, data, seq}`：`seq > 0` 一问一答，`seq = 0` 不等回复或服务端主动推；动词 `open` / `close` / `resize` / `ping` / `pong` / `error` / `ack` / `ls` / `mkdir` / `rm` / `upload` / `upload_end` / `download`。数据面（二进制帧）`[chan: u32 大端][flags: u16 大端][原始字节]`，`FLAG_END = 0x0001` 表示这路流到此结束。
-- **`src/ssh/` 尽量别动** —— 逐字保留的第三方协议栈，改一处会让报文编号对不上。目前只有两处刻意的补充，都有单测钉住：
+- **`src/ssh/` 尽量别动** —— 逐字保留的第三方协议栈（来自 EdgeSSH），改一处容易让报文编号对不上。目前有三处刻意的改动，都有单测钉住：
   - `sftp.ts` 的 `lstat()`：Go 版删除文件前用 LSTAT 判定类型、不跟随符号链接，少了它，指向目录的软链接会被当目录递归删除，删到链接目标上去。
-  - `algorithms.ts` 补上 `curve25519-sha256@libssh.org`：它是 `curve25519-sha256` 标准化之前的旧名，RFC 8731 明确二者是同一个算法（同样的 X25519、同样的 SHA-256），但协商是精确字符串匹配，名字对不上就报 `No common 密钥交换算法`。有些服务器（裁剪过的 sshd、非 OpenSSH 实现）只 advertise 旧名。
+  - `algorithms.ts` 补上 `curve25519-sha256@libssh.org`：它是 `curve25519-sha256` 标准化之前的旧名，RFC 8731 明确二者是同一个算法（同样的 X25519、同样的 SHA-256），但协商是精确字符串匹配，名字对不上就报 `No common 密钥交换算法`。有服务器只 advertise 旧名（实测：OpenSSH 9.2 + 手工配过 `KexAlgorithms`）。
+  - **Encrypt-then-MAC 支持**（落点 `algorithms.ts` + `crypto.ts` + `packet.ts`）：上游完全没有这个能力。规范见 OpenSSH `PROTOCOL` §1.5 —— `mac = MAC(key, seq ‖ packet_length ‖ encrypted_packet)`，长度字段明文发送，好处是**先验 MAC 再解密**，不再把未认证的密文喂给解密器。名字带 `-etm@openssh.com`，HMAC 本身与同名非 etm 完全相同，差异只在分帧，所以改动拆成三处：`algorithms.ts` 记名字与尺寸、`crypto.ts` 把后缀剥掉映射到同一个哈希、`packet.ts` 加收/发两条分支。
+- **怎么验证协议栈** —— 单测里 `vi.mock` 掉的那个连接对象，恰恰是最可能出问题的那部分，所以关键路径必须在真握手里过一遍。两条路：
+  - `npm run test:live` 连**真服务器**（`LIVE_SSH_HOST` / `LIVE_SSH_PORT` / `LIVE_SSH_USER` / `LIVE_SSH_KEY` 指向私钥文件），跑完整握手 + 公钥认证 + exec。不设这些变量就自动跳过，所以 `npm test` 始终不出网。
+  - `tests/live/etm_server.py` 起一个 paramiko 服务端，把加密算法锁成 `aes128-ctr`、MAC 锁成 `hmac-sha2-256-etm@openssh.com` —— 只有它验证得了 ETM。原因：AEAD 密码下 MAC 一律置 `none`，ETM 根本不会被触发，而现代服务器几乎都提供 AES-GCM；用 paramiko 则是因为它是**独立实现**，自己对自己做往返测试证明不了互通。
 - **想同步上游前端** —— 覆盖整个 `frontend/`，再把 `vite.config.ts` 的构建输出改回仓库根的 `./dist`。

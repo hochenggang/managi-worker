@@ -138,7 +138,11 @@ describe('checkAuth —— 会话 Cookie', () => {
   it('改掉签名里的任何一个字符都不通过', async () => {
     const token = await issueCookie(auth);
     const [expiry, signature] = token.split('.');
-    const flipped = `${signature!.slice(0, -1)}${signature!.at(-1) === 'A' ? 'B' : 'A'}`;
+    // 必须翻**第一个**字符：HMAC-SHA256 的 base64url 签名是 43 个字符，
+    // 最后一个字符只承载 4 个有效位、另 2 位是编码填充位，换成 'A'/'B' 解码结果相同 ——
+    // 拿它做「改一个字符就应失效」会在约 1/16 的情况下假通过（实测撞到过一次）。
+    const flipped = `${signature![0] === 'A' ? 'B' : 'A'}${signature!.slice(1)}`;
+    expect(flipped).not.toBe(signature);
     expect((await checkAuth(req({ Cookie: `managi_auth=${expiry}.${flipped}` }), env(auth))).ok).toBe(false);
   });
 

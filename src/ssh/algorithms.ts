@@ -24,7 +24,18 @@ export const SUPPORTED_ENCRYPTION_ALGORITHMS = [
   'aes256-ctr',
 ];
 
+// Encrypt-then-MAC 变体（OpenSSH PROTOCOL §1.5）。名字带 "-etm"，但**不是别名** ——
+// HMAC 本身与同名非 etm 完全一样，区别在报文分帧：MAC 覆盖密文而不是明文，且 packet_length
+// 以明文发送。握手时这两个名字与非 etm 的名字是并列的可选项，需要各自登记。
+export const MAC_ALGORITHM_HMAC_SHA2_256_ETM = 'hmac-sha2-256-etm@openssh.com';
+export const MAC_ALGORITHM_HMAC_SHA2_512_ETM = 'hmac-sha2-512-etm@openssh.com';
+
+// ETM 排在前（与 OpenSSH 的默认顺序一致）：它能消除「解密未认证密文」这个 oracle。
+// 实际只有协商到非 AEAD 密码时才会用到 —— 我们的加密算法偏好把 aes*-gcm 排在前面，
+// 所以 AEAD 连接上这两项根本不参与（AEAD 路径 MAC 一律置 none）。
 export const SUPPORTED_MAC_ALGORITHMS = [
+  MAC_ALGORITHM_HMAC_SHA2_256_ETM,
+  MAC_ALGORITHM_HMAC_SHA2_512_ETM,
   'hmac-sha2-256',
   'hmac-sha2-512',
 ];
@@ -54,11 +65,20 @@ const MAC_SPECS: Record<string, MacSpec> = {
   none: { length: 0, keyLength: 32 },
   'hmac-sha2-256': { length: 32, keyLength: 32 },
   'hmac-sha2-512': { length: 64, keyLength: 64 },
+  // etm 变体的 length / keyLength 与同名非 etm **必须一致**：keyLength 参与密钥派生，
+  // 改错会让两端派生出不同的完整性密钥，症状是「握手过、第一个报文就 MAC 校验失败」。
+  [MAC_ALGORITHM_HMAC_SHA2_256_ETM]: { length: 32, keyLength: 32 },
+  [MAC_ALGORITHM_HMAC_SHA2_512_ETM]: { length: 64, keyLength: 64 },
 };
 
 export function isCurve25519KEXAlgorithm(algorithm: string): boolean {
   return algorithm === KEX_ALGORITHM_CURVE25519_SHA256
     || algorithm === KEX_ALGORITHM_CURVE25519_SHA256_LIBSSH;
+}
+
+/** 这个名字是不是 Encrypt-then-MAC 变体 —— 报文分帧要据此切换。 */
+export function isEtmMacAlgorithm(algorithm: string): boolean {
+  return algorithm.endsWith('-etm@openssh.com');
 }
 
 export function getCipherSpec(algorithm: string): CipherSpec {

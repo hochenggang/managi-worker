@@ -4,3 +4,4 @@ dist/
 coverage/
 .dev.vars
 *.log
+tests/live/etm_hostkey

@@ -63,6 +63,7 @@ Scripts:
 | `npm run deploy` | Deploy to Cloudflare |
 | `npm test` | Unit tests (450+ specs, ~5s, no network needed) |
 | `npm run test:coverage` | Tests plus a coverage report (`coverage/index.html`) |
+| `npm run test:live` | One full handshake against a **real** SSH server (needs `LIVE_SSH_*`; skipped by default) |
 | `npm run typecheck` | TypeScript checks for both the source and the test config |
 | `npm run check` | Typecheck + tests + a dry-run bundle |
 
@@ -122,6 +123,7 @@ managi-worker/
 │   ├── types.ts           # SSH constants, connection config, Env
 │   └── ssh/               # SSH protocol stack, taken verbatim from EdgeSSH
 ├── tests/                 # Unit tests (run on Node, no workerd)
+│   └── live/              # interop checks against a real server / local paramiko (skipped by default)
 ├── frontend/              # Frontend, byte-identical to managi-v3/frontend (only vite.config.ts differs)
 ├── scripts/build-web.mjs  # Builds the single-file frontend bundle into ./dist
 ├── wrangler.toml
@@ -132,7 +134,11 @@ managi-worker/
 
 - **Tests run on Node, not in workerd** — so they need no network access and no reachable sshd. What is exercised is the orchestration logic: `cloudflare:sockets` is aliased to a stub (its only consumer is `dial.ts`), and `SSHConnection` plus the three channel handlers are swapped out wholesale with `vi.mock`. `src/ssh/**` (the verbatim protocol stack) is excluded from the coverage denominator — it only means anything against a real server.
 - **The protocol is fixed** — zero frontend changes is a hard constraint, so don't invent fields. Control plane (text frames) is `{type, data, seq}`: `seq > 0` is request/response, `seq = 0` expects no reply or is a server push. Verbs: `open` / `close` / `resize` / `ping` / `pong` / `error` / `ack` / `ls` / `mkdir` / `rm` / `upload` / `upload_end` / `download`. Data plane (binary frames) is `[chan: u32 BE][flags: u16 BE][raw bytes]`, with `FLAG_END = 0x0001` ending the stream.
-- **Leave `src/ssh/` alone** — it is a verbatim third-party protocol stack, and touching one spot desynchronizes the message numbering. There are exactly two deliberate additions so far, both pinned by tests:
+- **Leave `src/ssh/` alone** — it is a verbatim third-party protocol stack (from EdgeSSH), and touching one spot easily desynchronizes the message numbering. There are three deliberate changes so far, all pinned by tests:
   - `lstat()` in `sftp.ts`: the Go version uses LSTAT before deleting so it does not follow symlinks, and without it a symlink pointing at a directory is recursively deleted as a directory, wiping the link target.
-  - `curve25519-sha256@libssh.org` added to `algorithms.ts`: it is the pre-standardization name of `curve25519-sha256`, and RFC 8731 states the two are the same algorithm (same X25519, same SHA-256). Negotiation is an exact string match though, so a name mismatch fails with `No common ...`. Some servers (trimmed-down sshd, non-OpenSSH implementations) only advertise the old name.
+  - `curve25519-sha256@libssh.org` added to `algorithms.ts`: it is the pre-standardization name of `curve25519-sha256`, and RFC 8731 states the two are the same algorithm (same X25519, same SHA-256). Negotiation is an exact string match though, so a name mismatch fails with `No common ...`. Some servers only advertise the old name (observed on OpenSSH 9.2 with a hand-written `KexAlgorithms`).
+  - **Encrypt-then-MAC support** (lands in `algorithms.ts` + `crypto.ts` + `packet.ts`): upstream has no such thing at all. The spec is OpenSSH `PROTOCOL` §1.5 — `mac = MAC(key, seq ‖ packet_length ‖ encrypted_packet)`, with the packet length sent in the clear, so the MAC is verified **before** decryption and unauthenticated ciphertext never reaches the decryptor. The name carries a `-etm@openssh.com` suffix but the HMAC itself is identical to the non-etm variant; only the framing differs. Hence three surgical edits: `algorithms.ts` registers the names and sizes, `crypto.ts` strips the suffix and maps to the same hash, `packet.ts` gains a send and a receive branch.
+- **How the protocol stack gets verified** — the connection object that unit tests `vi.mock` away is exactly the part most likely to be wrong, so the critical paths have to go through a real handshake. Two routes:
+  - `npm run test:live` talks to a **real server** (`LIVE_SSH_HOST` / `LIVE_SSH_PORT` / `LIVE_SSH_USER` / `LIVE_SSH_KEY` pointing at a private key file): full handshake, public-key auth, exec. Unset those and it skips itself, so `npm test` never needs the network.
+  - `tests/live/etm_server.py` starts a paramiko server with ciphers pinned to `aes128-ctr` and MACs pinned to `hmac-sha2-256-etm@openssh.com` — the only setup that can exercise ETM. On an AEAD cipher the MAC is always `none`, so ETM never runs, and virtually every modern server offers AES-GCM. paramiko is used because it is an **independent implementation**; a round-trip test against ourselves proves nothing about interop.
 - **Syncing the upstream frontend** — overwrite all of `frontend/`, then restore the one `vite.config.ts` change that writes the bundle to `./dist` at the repo root.
