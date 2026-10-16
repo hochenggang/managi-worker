@@ -1,0 +1,44 @@
+{
+  "name": "managi-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "把 managi-v3 的 Web SSH 工作台搬到 Cloudflare Workers：浏览器直连 SSH，Worker 只做中转，凭据不落盘。",
+  "cloudflare": {
+    "label": "Managi WebSSH",
+    "products": [
+      "Workers",
+      "Durable Objects",
+      "KV"
+    ],
+    "categories": [
+      "developer-tools"
+    ],
+    "bindings": {
+      "MANAGI_KNOWN_HOSTS": {
+        "description": "记录首次连接时信任的 SSH 主机密钥（TOFU），部署时自动创建。",
+        "type": "kv_namespace"
+      }
+    }
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build:web": "node scripts/build-web.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "check": "npm run typecheck && npm run test && wrangler deploy --dry-run --outdir .wrangler/build"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261006.1",
+    "@vitest/coverage-v8": "^3.2.7",
+    "typescript": "~5.9.2",
+    "vitest": "^3.2.7",
+    "wrangler": "^4.151.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

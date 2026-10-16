@@ -1,0 +1,38 @@
+name = "managi-worker"
+main = "src/worker.ts"
+compatibility_date = "2026-07-01"
+workers_dev = true
+preview_urls = false
+
+# 前端是一个单文件 SPA（vite-plugin-singlefile），构建产物落在 ./dist。
+# 直接用模板默认的 workers.dev 地址，不绑定原作者的域名。
+[build]
+command = "npm run build:web"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+# 静态资源也走 Worker：访问口令（MANAGI_AUTH）要能同时挡住页面和 /ws。
+run_worker_first = true
+
+[vars]
+# SSH 建连超时（毫秒），钳制在 2s ~ 30s。
+CONNECT_TIMEOUT_MS = "10000"
+# 主机密钥校验模式：
+#   tofu —— 首次连接记录指纹，之后必须一致（默认，推荐）
+#   off  —— 不校验，直接接受任何主机密钥
+HOST_KEY_MODE = "tofu"
+
+# 一条 WebSocket = 一个 Durable Object 实例，独占这条连接上的全部 SSH 通道。
+[[durable_objects.bindings]]
+name = "MANAGI_SESSIONS"
+class_name = "ManagiSessionDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ManagiSessionDO"]
+
+# 已知主机密钥的落盘处（TOFU）。部署脚本/Deploy 按钮会在目标账户里创建它。
+[[kv_namespaces]]
+binding = "MANAGI_KNOWN_HOSTS"

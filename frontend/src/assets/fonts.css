@@ -1,0 +1,18 @@
+/* 终端字体全部随单文件构建内嵌：vite-plugin-singlefile 把 assetsInlineLimit 设为不限，
+   下面的 url() 会编译成 data: URI 写进 index.html，运行期不再请求任何外部字体文件。
+   family 名统一加 Managi- 前缀，避免命中用户系统里同名的已安装字体。 */
+
+@font-face {
+  font-family: 'Managi JetBrains Mono';
+  src: url('./JetBrainsMono-ExtraLight.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Managi OldTimeyCode';
+  src: url('./OldTimeyCode-Light.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Managi Honchoko Mono';
+  src: url('./honchokomono-light-normal.otf') format('opentype');
+}

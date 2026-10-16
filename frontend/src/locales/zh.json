@@ -1,0 +1,193 @@
+{
+    "header": {
+        "total": "共",
+        "nodes": "节点",
+        "choosed": "已选",
+        "actions": {
+            "all": "全选",
+            "none": "全不选",
+            "add": "添加节点",
+            "edit": "编辑",
+            "delete": "删除",
+            "batch": "批量执行",
+            "settings": "设置"
+        }
+    },
+    "sidebar": {
+        "collapse": "收起侧边栏",
+        "expand": "展开侧边栏",
+        "search": "搜索主机...",
+        "allHosts": "全部主机",
+        "newGroup": "新建分组",
+        "newGroupPlaceholder": "输入分组名称",
+        "renameGroup": "重命名分组",
+        "renameGroupPlaceholder": "输入新分组名称",
+        "deleteGroup": "删除分组",
+        "deleteGroupConfirm": "确定删除分组",
+        "moveToGroup": "移动到",
+        "moveToUngrouped": "移出分组"
+    },
+    "footer": {
+        "actions": {
+            "export": "导出",
+            "import": "导入"
+        }
+    },
+    "addNode": {
+        "title": "编辑节点",
+        "name": "备注名：",
+        "namePlaceholder": "输入主机别名",
+        "host": "IP地址或域名：",
+        "hostPlaceholder": "输入 IPV4/V6/域名",
+        "port": "SSH端口号：",
+        "portPlaceholder": "输入SSH端口号",
+        "username": "SSH用户名：",
+        "usernamePlaceholder": "输入SSH用户名",
+        "authType": "认证类型：",
+        "authTypePassword": "密码认证",
+        "authTypePrivateKey": "密钥认证",
+        "authValue": "密码或密钥：",
+        "authValuePlaceholder": "输入密码或密钥的值",
+        "group": "分组：",
+        "groupPlaceholder": "留空则为默认分组",
+        "actions": {
+            "save": "保存",
+            "cancel": "取消"
+        },
+        "importSucess": "节点导入成功",
+        "importError": "节点导入失败",
+        "exportSucess": "节点导出成功",
+        "exportConfigSucess": "配置导出成功",
+        "importConfigSucess": "配置导入成功",
+        "importConfigError": "配置导入失败",
+        "invalidPort": "端口号必须是 1-65535 的整数"
+    },
+    "cmdPanel": {
+        "shortcut": "快捷命令：",
+        "commandPlaceholder": "在此输入 Shell 命令行",
+        "saveShortCut": "保存命令",
+        "saveShortCutPlaceholder": "输入快捷命令名称",
+        "confirmAddShortcut": "确定",
+        "cancelShortCut": "取消",
+        "executeCommand": "开始执行",
+        "executing": "执行中...",
+        "addNodeToContinue": "添加一个节点以继续",
+        "noCmd": "输入框里面似乎没东西，无法保存为快捷命令",
+        "shortcutNameRequired": "请输入快捷命令名称",
+        "shortcutDeleteConfirm": "确定要删除该快捷命令吗？",
+        "renameShortcut": "请输入新的名称",
+        "rename": "重命名",
+        "delete": "删除",
+        "emptyCmd": "输入框里面似乎没东西",
+        "nothingSelected": "请选择至少1个节点再执行命令",
+        "copied": "已复制",
+        "copyError": "复制失败",
+        "copy": "复制"
+    },
+    "xtermPanel": {
+        "finder": "文件管理",
+        "terminal": "终端",
+        "back": "返回",
+        "hello": "鼠标浮在左侧节点上，点击终端图标来开启一个连接吧",
+        "idle": "未连接节点",
+        "connecting": "正在连接…",
+        "reconnecting": "正在重连…",
+        "failed": "连接失败"
+    },
+    "finder": {
+        "actions": {
+            "reflush": "刷新",
+            "newDir": "新建文件夹",
+            "upload": "上传文件",
+            "download": "下载文件",
+            "delete": "删除文件"
+        },
+        "filename": "文件名",
+        "size": "文件大小",
+        "mtime": "修改时间",
+        "loading": "加载中...",
+        "empty": "空文件夹",
+        "upDir": "..",
+        "connecting": "正在连接",
+        "connected": "已连接",
+        "reconnecting": "即将重连",
+        "error": "出现错误",
+        "downloaded": "下载完成",
+        "uploaded": "上传完成",
+        "uploadFailed": "部分文件上传失败",
+        "deleteConfire": "确认删除吗？",
+        "ok": "确定",
+        "cancle": "取消",
+        "newDirPlaceholder": "输入文件夹名称",
+        "total": "当前目录共",
+        "item": "项",
+        "current": "，当前选中",
+        "file": "文件",
+        "dir": "文件夹"
+    },
+    "tabs": {
+        "close": "关闭",
+        "closeOthers": "关闭其他",
+        "closeAll": "关闭全部",
+        "empty": "暂无标签页",
+        "newBatch": "新建批量执行标签",
+        "batch": "批量执行",
+        "terminal": "终端",
+        "sftp": "文件管理",
+        "settings": "设置"
+    },
+    "quickCommand": {
+        "searchPlaceholder": "搜索命令...",
+        "noResult": "无匹配命令",
+        "cmds": {
+            "systemInfo": "系统信息",
+            "cpu": "CPU",
+            "memory": "内存",
+            "disk": "磁盘",
+            "process": "进程",
+            "uptime": "运行时间",
+            "ip": "IP 地址",
+            "route": "路由",
+            "ping": "Ping",
+            "ports": "端口",
+            "findLargeFiles": "大文件",
+            "tailLog": "日志尾部",
+            "grep": "文本搜索"
+        }
+    },
+    "settings": {
+        "appearance": {
+            "title": "外观",
+            "theme": "主题",
+            "language": "语言"
+        },
+        "terminal": {
+            "title": "终端",
+            "fontSize": "字体大小",
+            "fontFamily": "字体",
+            "fonts": {
+                "jetbrains": "JetBrains Mono ExtraLight",
+                "oldtimey": "OldTimeyCode Light",
+                "honchoko": "Honchoko Mono Light",
+                "system": "系统等宽字体"
+            }
+        },
+        "security": {
+            "title": "安全",
+            "desc": "安全相关设置将在后续版本提供。"
+        },
+        "data": {
+            "title": "数据",
+            "desc": "导出或导入包含节点、分组与快捷命令的配置文件。",
+            "export": "导出配置",
+            "import": "导入配置",
+            "exportSuccess": "配置导出成功",
+            "importSuccess": "配置导入成功",
+            "importError": "配置导入失败"
+        },
+        "about": {
+            "title": "关于",
+            "desc": "Managi 是一个轻量级的服务器管理工具。"
+        }
+    }
+}

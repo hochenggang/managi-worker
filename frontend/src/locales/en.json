@@ -1,0 +1,193 @@
+{
+    "header": {
+        "total": "Total",
+        "nodes": "nodes",
+        "choosed": "Selected",
+        "actions": {
+            "all": "All",
+            "none": "None",
+            "add": "Add node",
+            "edit": "Edit",
+            "delete": "Delete",
+            "batch": "Batch",
+            "settings": "Settings"
+        }
+    },
+    "sidebar": {
+        "collapse": "Collapse Sidebar",
+        "expand": "Expand Sidebar",
+        "search": "Search hosts...",
+        "allHosts": "All Hosts",
+        "newGroup": "New Group",
+        "newGroupPlaceholder": "Enter group name",
+        "renameGroup": "Rename Group",
+        "renameGroupPlaceholder": "Enter new group name",
+        "deleteGroup": "Delete Group",
+        "deleteGroupConfirm": "Delete group",
+        "moveToGroup": "Move to",
+        "moveToUngrouped": "Move out of group"
+    },
+    "footer": {
+        "actions": {
+            "export": "Export",
+            "import": "Import"
+        }
+    },
+    "addNode": {
+        "title": "Edit Node",
+        "name": "Name:",
+        "namePlaceholder": "Enter nickname for node.",
+        "host": "IP or Domain:",
+        "hostPlaceholder": "Enter ip or domain.",
+        "port": "Port Number:",
+        "portPlaceholder": "Enter ssh port number.",
+        "username": "SSH Username:",
+        "usernamePlaceholder": "Enter ssh username.",
+        "authType": "Auth Type:",
+        "authTypePassword": "Password",
+        "authTypePrivateKey": "Private Key",
+        "authValue": "Password or Private Key",
+        "authValuePlaceholder": "Enter value of Password or Private Key.",
+        "group": "Group:",
+        "groupPlaceholder": "Leave empty for default group",
+        "actions": {
+            "save": "Save",
+            "cancel": "Cancel"
+        },
+        "importSucess": "Import Sucessful",
+        "importError": "Import Failed",
+        "exportSucess": "Export Sucessful",
+        "exportConfigSucess": "Config Exported",
+        "importConfigSucess": "Config Imported",
+        "importConfigError": "Config Import Failed",
+        "invalidPort": "Port must be an integer between 1 and 65535"
+    },
+    "cmdPanel": {
+        "shortcut": "Shortcut Command: ",
+        "commandPlaceholder": "Enter Shell command here",
+        "saveShortCut": "Save current command as",
+        "saveShortCutPlaceholder": "Enter shortcut command name",
+        "confirmAddShortcut": "Confirm",
+        "cancelShortCut": "Cancel",
+        "executeCommand": "Execute",
+        "executing": "Executing...",
+        "addNodeToContinue": "Add a node to proceed",
+        "noCmd": "Input is empty. Cannot save as a shortcut.",
+        "shortcutNameRequired": "Enter a shortcut name.",
+        "shortcutDeleteConfirm": "Delete this shortcut?",
+        "renameShortcut": "Enter new name",
+        "rename": "Rename",
+        "delete": "Delete",
+        "emptyCmd": "Input is empty.",
+        "nothingSelected": "Select at least one node to proceed.",
+        "copied": "Copied.",
+        "copyError": "Copy failed.",
+        "copy": "Copy"
+    },
+    "xtermPanel": {
+        "finder": "File Manager",
+        "terminal": "Terminal",
+        "back": "Back",
+        "hello": "Hover over a node on the left and click the terminal icon to open a connection.",
+        "idle": "No node connected",
+        "connecting": "Connecting…",
+        "reconnecting": "Reconnecting…",
+        "failed": "Connection failed"
+    },
+    "finder": {
+        "actions": {
+            "reflush": "Reflush",
+            "newDir": "New Dir",
+            "upload": "Upload",
+            "download": "Download",
+            "delete": "Delete"
+        },
+        "filename": "Filename",
+        "size": "Size",
+        "mtime": "Mtime",
+        "loading": "Loading...",
+        "empty": "Empty",
+        "upDir": "..",
+        "connecting": "Connecting",
+        "connected": "Connected",
+        "reconnecting": "Reconnecting soon",
+        "error": "An error occurred",
+        "downloaded": "Download completed",
+        "uploaded": "Upload completed",
+        "uploadFailed": "Some files failed to upload",
+        "deleteConfire": "Are you sure you want to delete this?",
+        "ok": "Confirm",
+        "cancle": "Cancel",
+        "newDirPlaceholder": "Enter folder name",
+        "total": "Total",
+        "item": "items",
+        "current": ", Selected ",
+        "file": "File",
+        "dir": "Dir"
+    },
+    "tabs": {
+        "close": "Close",
+        "closeOthers": "Close Others",
+        "closeAll": "Close All",
+        "empty": "No tabs",
+        "newBatch": "New Batch Tab",
+        "batch": "Batch",
+        "terminal": "Terminal",
+        "sftp": "SFTP",
+        "settings": "Settings"
+    },
+    "quickCommand": {
+        "searchPlaceholder": "Search commands...",
+        "noResult": "No matching commands",
+        "cmds": {
+            "systemInfo": "System Info",
+            "cpu": "CPU",
+            "memory": "Memory",
+            "disk": "Disk",
+            "process": "Processes",
+            "uptime": "Uptime",
+            "ip": "IP Address",
+            "route": "Route",
+            "ping": "Ping",
+            "ports": "Ports",
+            "findLargeFiles": "Large Files",
+            "tailLog": "Tail Log",
+            "grep": "Text Search"
+        }
+    },
+    "settings": {
+        "appearance": {
+            "title": "Appearance",
+            "theme": "Theme",
+            "language": "Language"
+        },
+        "terminal": {
+            "title": "Terminal",
+            "fontSize": "Font Size",
+            "fontFamily": "Font Family",
+            "fonts": {
+                "jetbrains": "JetBrains Mono ExtraLight",
+                "oldtimey": "OldTimeyCode Light",
+                "honchoko": "Honchoko Mono Light",
+                "system": "System Monospace"
+            }
+        },
+        "security": {
+            "title": "Security",
+            "desc": "Security settings will be available in a future release."
+        },
+        "data": {
+            "title": "Data",
+            "desc": "Export or import a config file containing nodes, groups and shortcuts.",
+            "export": "Export Config",
+            "import": "Import Config",
+            "exportSuccess": "Config exported",
+            "importSuccess": "Config imported",
+            "importError": "Config import failed"
+        },
+        "about": {
+            "title": "About",
+            "desc": "Managi is a lightweight server management tool."
+        }
+    }
+}

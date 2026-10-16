@@ -1,0 +1,256 @@
+:root,
+.theme-nord {
+  /* Nord Dark（默认） */
+  --color-accent: #88C0D0;
+  --color-main: #88C0D0;
+  --color-sub: #434C5E;
+
+  --color-bg: #2E3440;
+  --color-panel-bg: #3B4252;
+  --color-sidebar-bg: #2E3440;
+  --color-surface: #434C5E;
+  --color-input-bg: #2E3440;
+  --color-hover-bg: rgba(136, 192, 208, 0.12);
+  --color-selected-bg: rgba(136, 192, 208, 0.18);
+  --color-menu-bg: #3B4252;
+
+  --color-border: #4C566A;
+  --color-border-subtle: #434C5E;
+
+  --color-font-1: #D8DEE9;
+  --color-font-2: #E5E9F0;
+  --color-font-3: #81A1C1;
+
+  --color-green: #A3BE8C;
+  --color-red: #BF616A;
+  --color-orange: #D08770;
+  --color-yellow: #EBCB8B;
+
+  --color-tab-bar-bg: #2E3440;
+  --color-tab-active-bg: #3B4252;
+  --color-tab-inactive-bg: #2E3440;
+  --color-tab-hover-bg: #434C5E;
+
+  /* xterm.js 终端专用 token */
+  --color-terminal-bg: #2E3440;
+  --color-terminal-fg: #D8DEE9;
+  --color-terminal-cursor: #D8DEE9;
+  --color-terminal-cursor-accent: #2E3440;
+  --color-terminal-selection: rgba(136, 192, 208, 0.3);
+
+  --color-terminal-black: #3B4252;
+  --color-terminal-red: #BF616A;
+  --color-terminal-green: #A3BE8C;
+  --color-terminal-yellow: #EBCB8B;
+  --color-terminal-blue: #81A1C1;
+  --color-terminal-magenta: #B48EAD;
+  --color-terminal-cyan: #88C0D0;
+  --color-terminal-white: #E5E9F0;
+
+  --color-terminal-brightBlack: #4C566A;
+  --color-terminal-brightRed: #BF616A;
+  --color-terminal-brightGreen: #A3BE8C;
+  --color-terminal-brightYellow: #EBCB8B;
+  --color-terminal-brightBlue: #81A1C1;
+  --color-terminal-brightMagenta: #B48EAD;
+  --color-terminal-brightCyan: #8FBCBB;
+  --color-terminal-brightWhite: #ECEFF4;
+}
+
+.theme-nord-light {
+  /* Nord Light */
+  --color-accent: #5E81AC;
+  --color-main: #5E81AC;
+  --color-sub: #D8DEE9;
+
+  --color-bg: #ECEFF4;
+  --color-panel-bg: #E5E9F0;
+  --color-sidebar-bg: #ECEFF4;
+  --color-surface: #FFFFFF;
+  --color-input-bg: #FFFFFF;
+  --color-hover-bg: rgba(94, 129, 172, 0.12);
+  --color-selected-bg: rgba(94, 129, 172, 0.18);
+  --color-menu-bg: #E5E9F0;
+
+  --color-border: #D8DEE9;
+  --color-border-subtle: #E5E9F0;
+
+  --color-font-1: #2E3440;
+  --color-font-2: #3B4252;
+  --color-font-3: #4C566A;
+
+  --color-green: #A3BE8C;
+  --color-red: #BF616A;
+  --color-orange: #D08770;
+  --color-yellow: #EBCB8B;
+
+  --color-tab-bar-bg: #ECEFF4;
+  --color-tab-active-bg: #E5E9F0;
+  --color-tab-inactive-bg: #ECEFF4;
+  --color-tab-hover-bg: #D8DEE9;
+
+  --color-terminal-bg: #ECEFF4;
+  --color-terminal-fg: #2E3440;
+  --color-terminal-cursor: #2E3440;
+  --color-terminal-cursor-accent: #ECEFF4;
+  --color-terminal-selection: rgba(94, 129, 172, 0.25);
+
+  --color-terminal-black: #3B4252;
+  --color-terminal-red: #BF616A;
+  --color-terminal-green: #A3BE8C;
+  --color-terminal-yellow: #EBCB8B;
+  --color-terminal-blue: #5E81AC;
+  --color-terminal-magenta: #B48EAD;
+  --color-terminal-cyan: #88C0D0;
+  --color-terminal-white: #E5E9F0;
+
+  --color-terminal-brightBlack: #4C566A;
+  --color-terminal-brightRed: #BF616A;
+  --color-terminal-brightGreen: #A3BE8C;
+  --color-terminal-brightYellow: #EBCB8B;
+  --color-terminal-brightBlue: #5E81AC;
+  --color-terminal-brightMagenta: #B48EAD;
+  --color-terminal-brightCyan: #8FBCBB;
+  --color-terminal-brightWhite: #FFFFFF;
+}
+
+.theme-github-dark {
+  --color-accent: #58A6FF;
+  --color-main: #58A6FF;
+  --color-sub: #161B22;
+
+  --color-bg: #0D1117;
+  --color-panel-bg: #161B22;
+  --color-sidebar-bg: #0D1117;
+  --color-surface: #161B22;
+  --color-input-bg: #0D1117;
+  --color-hover-bg: rgba(88, 166, 255, 0.12);
+  --color-selected-bg: rgba(88, 166, 255, 0.18);
+  --color-menu-bg: #161B22;
+
+  --color-border: #30363D;
+  --color-border-subtle: #161B22;
+
+  --color-font-1: #C9D1D9;
+  --color-font-2: #E6EDF3;
+  --color-font-3: #8B949E;
+
+  --color-green: #3FB950;
+  --color-red: #F85149;
+  --color-orange: #FB8500;
+  --color-yellow: #D29922;
+
+  --color-tab-bar-bg: #0D1117;
+  --color-tab-active-bg: #161B22;
+  --color-tab-inactive-bg: #0D1117;
+  --color-tab-hover-bg: #30363D;
+
+  --color-terminal-bg: #0D1117;
+  --color-terminal-fg: #C9D1D9;
+  --color-terminal-cursor: #C9D1D9;
+  --color-terminal-cursor-accent: #0D1117;
+  --color-terminal-selection: rgba(88, 166, 255, 0.25);
+
+  --color-terminal-black: #010409;
+  --color-terminal-red: #FF7B72;
+  --color-terminal-green: #3FB950;
+  --color-terminal-yellow: #D29922;
+  --color-terminal-blue: #58A6FF;
+  --color-terminal-magenta: #D2A8FF;
+  --color-terminal-cyan: #39C5CF;
+  --color-terminal-white: #B0B8C4;
+
+  --color-terminal-brightBlack: #6E7681;
+  --color-terminal-brightRed: #FFA198;
+  --color-terminal-brightGreen: #56D364;
+  --color-terminal-brightYellow: #E3B341;
+  --color-terminal-brightBlue: #79C0FF;
+  --color-terminal-brightMagenta: #E2C5FF;
+  --color-terminal-brightCyan: #56D4DD;
+  --color-terminal-brightWhite: #F0F6FC;
+}
+
+.theme-github-light {
+  --color-accent: #0969DA;
+  --color-main: #0969DA;
+  --color-sub: #D0D7DE;
+
+  --color-bg: #FFFFFF;
+  --color-panel-bg: #F6F8FA;
+  --color-sidebar-bg: #FFFFFF;
+  --color-surface: #FFFFFF;
+  --color-input-bg: #FFFFFF;
+  --color-hover-bg: rgba(9, 105, 218, 0.08);
+  --color-selected-bg: rgba(9, 105, 218, 0.12);
+  --color-menu-bg: #F6F8FA;
+
+  --color-border: #D0D7DE;
+  --color-border-subtle: #EAEEF2;
+
+  --color-font-1: #1F2328;
+  --color-font-2: #24292F;
+  --color-font-3: #6E7781;
+
+  --color-green: #1A7F37;
+  --color-red: #CF222E;
+  --color-orange: #BC4C00;
+  --color-yellow: #9A6700;
+
+  --color-tab-bar-bg: #FFFFFF;
+  --color-tab-active-bg: #F6F8FA;
+  --color-tab-inactive-bg: #FFFFFF;
+  --color-tab-hover-bg: #EAEEF2;
+
+  --color-terminal-bg: #FFFFFF;
+  --color-terminal-fg: #1F2328;
+  --color-terminal-cursor: #1F2328;
+  --color-terminal-cursor-accent: #FFFFFF;
+  --color-terminal-selection: rgba(9, 105, 218, 0.2);
+
+  --color-terminal-black: #24292F;
+  --color-terminal-red: #CF222E;
+  --color-terminal-green: #1A7F37;
+  --color-terminal-yellow: #9A6700;
+  --color-terminal-blue: #0969DA;
+  --color-terminal-magenta: #8250DF;
+  --color-terminal-cyan: #0A7C83;
+  --color-terminal-white: #6E7781;
+
+  --color-terminal-brightBlack: #6E7781;
+  --color-terminal-brightRed: #A40E26;
+  --color-terminal-brightGreen: #2DA44E;
+  --color-terminal-brightYellow: #7D4E00;
+  --color-terminal-brightBlue: #218BFF;
+  --color-terminal-brightMagenta: #A475F9;
+  --color-terminal-brightCyan: #0598BC;
+  --color-terminal-brightWhite: #F6F8FA;
+}
+
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  font-weight: normal;
+  text-decoration: none;
+  outline: none;
+}
+
+body {
+  font-size: 14px;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 隐藏滚动条但保留滚动能力 */
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
