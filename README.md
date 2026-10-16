@@ -2,7 +2,7 @@
 
 **在 Cloudflare Workers 上跑自己的 Web SSH 工作台。**
 
-浏览器直接跟你的服务器讲 SSH，Worker 只做中转：凭据跟着请求走一趟就被丢掉，不落任何存储，也不需要你额外养一台跳板机。
+浏览器直接用 SSH 连你的服务器，Worker 只做中转：凭据跟着请求走一趟就被丢掉，不落任何存储，也不需要你额外养一台跳板机。
 
 > 这是 [managi-v3](https://github.com/hochenggang/managi-v3)（Go 后端 + Vue3 前端）的 Cloudflare Workers 移植版，SSH 协议栈逐字取自 [EdgeSSH](https://github.com/aozorae/EdgeSSH)。前端一行没改，重写的只有后端通讯层。
 >
@@ -68,7 +68,7 @@ npx wrangler dev --var MANAGI_AUTH:ops:s3cret
 
 ## 和 Go 版不一样的地方
 
-移植目标是「稳定简单」，于是砍掉了 Go 版一些为长期运行而生的机制。四条必须知道的：
+移植目标是「稳定简单」，于是砍掉了 Go 版一些为长期运行而生的机制。下面四条必须知道：
 
 | 差异 | 说明 |
 | --- | --- |
