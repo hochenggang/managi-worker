@@ -6,6 +6,7 @@ import {
   SSHAuthDefectError,
   SSHConnection,
   describeConnectFailure,
+  negotiateMac,
   type ChannelCallbacks,
   type ExecResult,
 } from '../src/session';
@@ -955,5 +956,43 @@ describe('文件属性渲染的边界（经由 list 观察）', () => {
       { filename: 'l', size: 5, mode: 'lrwxrwxrwx', is_dir: false, mtime: 0 },
       { filename: 'f', size: 42, mode: '-rw-r--r--', is_dir: false, mtime: 0 },
     ]);
+  });
+});
+
+// 这条修的是「假失败」：服务器给 aes*-gcm（AEAD），但它的 MAC 列表与我们不相交。
+// 上游 EdgeSSH 无条件协商 MAC —— 于是报 No common MAC，而正确行为是按规范跳过协商直接连通。
+// 下面两组列表直接取自真实服务器（185.82.202.216:10010）的 KEXINIT。
+describe('negotiateMac：AEAD 下必须跳过 MAC 协商', () => {
+  const OUR_MACS = ['hmac-sha2-256', 'hmac-sha2-512'];
+  const SERVER_MACS = ['hmac-sha2-512-etm@openssh.com', 'hmac-sha2-256-etm@openssh.com'];
+
+  it('AEAD 密码 + MAC 完全无交集 → 返回 none，不抛错', () => {
+    expect(negotiateMac(OUR_MACS, SERVER_MACS, '客户端 MAC', 'aes128-gcm@openssh.com')).toBe('none');
+  });
+
+  it('反向（服务端加密）同样跳过', () => {
+    expect(negotiateMac(OUR_MACS, SERVER_MACS, '服务端 MAC', 'aes256-gcm@openssh.com')).toBe('none');
+  });
+
+  it('AEAD 下即使 MAC 有交集也返回 none —— AEAD 根本不消费这个结果', () => {
+    expect(negotiateMac(OUR_MACS, OUR_MACS, '客户端 MAC', 'aes128-gcm@openssh.com')).toBe('none');
+  });
+
+  it('非 AEAD 且无交集 → 仍然如实报错，不静默降级', () => {
+    expect(() => negotiateMac(OUR_MACS, SERVER_MACS, '客户端 MAC', 'aes256-ctr')).toThrow(/No common 客户端 MAC/);
+  });
+
+  it('非 AEAD 的报错要带上已选加密算法 —— 否则分不清是服务器没给可用 MAC', () => {
+    expect(() => negotiateMac(OUR_MACS, SERVER_MACS, '客户端 MAC', 'aes256-ctr'))
+      .toThrow(/加密算法已选 aes256-ctr，不是 AEAD，MAC 必须协商成功/);
+  });
+
+  it('非 AEAD 且 MAC 有交集 → 按客户端偏好顺序选，不跟服务器顺序', () => {
+    expect(negotiateMac(['hmac-sha2-512', 'hmac-sha2-256'], ['hmac-sha2-256', 'hmac-sha2-512'], '客户端 MAC', 'aes128-ctr'))
+      .toBe('hmac-sha2-512');
+  });
+
+  it('加密算法名不认识时直接抛错，不会被当成 AEAD 蒙过去', () => {
+    expect(() => negotiateMac(OUR_MACS, OUR_MACS, '客户端 MAC', 'aes128-cbc')).toThrow(/Unsupported cipher/);
   });
 });

@@ -94,6 +94,35 @@ export function describeConnectFailure(error: unknown, host: string, port: numbe
   return `${host.trim()}:${port} — ${message}`;
 }
 
+/**
+ * 协商 MAC。
+ *
+ * AEAD 密码（aes*-gcm）自带完整性保护，此时按规范**必须跳过** MAC 协商：
+ * draft-miller-sshm-aes-gcm §2 —— 两端谈成 AEAD 后，「MAC 列表无交集」不得导致连接失败。
+ * 上游 EdgeSSH 是无条件协商的（它那里有条注释自陈理由，说 RFC 4253 要求协商 MAC ——
+ * 依据是过时版本；RFC 5647 的那条规则正被该草案修正），于是「服务器给 aes*-gcm、
+ * 但它的 MAC 列表与我们不相交」会**假失败**：明明能连，却报 No common MAC。
+ *
+ * 这是严格的扩集：只在「已选 AEAD 且 MAC 无交集」这一种情况下，把结果从抛错改成连通。
+ * AEAD 路径本来就把 MAC 置 'none'，密钥派生长度与 signer/verifier 的创建条件都不变，
+ * 所以对已经能连的服务器零影响。
+ */
+export function negotiateMac(
+  clientList: string[],
+  serverList: string[],
+  label: string,
+  cipher: string,
+): string {
+  if (getCipherSpec(cipher).aead) return 'none';
+  try {
+    return negotiate(clientList, serverList, label);
+  } catch (error) {
+    // 非 AEAD 时 MAC 确实必须协商成功。补上已选加密算法，否则只看这条报文分不清
+    // 「服务器没给出可用 MAC」和「它的 MAC 是给 AEAD 之外的东西配的」。
+    throw new Error(`${messageOf(error)}（加密算法已选 ${cipher}，不是 AEAD，MAC 必须协商成功）`);
+  }
+}
+
 /** 一路通道对外的三个出口 + 两个生命周期通知。 */
 export interface ChannelCallbacks {
   /** 通道上的字节，要发给浏览器。end=true 表示这路流到此结束。 */
@@ -368,10 +397,8 @@ export class SSHConnection {
         && (filterExtInfo(server.kexAlgorithms)[0] !== this.kexName || server.hostKeyAlgorithms[0] !== this.hostKeyAlgorithm);
       this.cipherC2S = negotiate(client.encryptionC2S, server.encryptionC2S, '客户端加密算法');
       this.cipherS2C = negotiate(client.encryptionS2C, server.encryptionS2C, '服务端加密算法');
-      const negotiatedMacC2S = negotiate(client.macC2S, server.macC2S, '客户端 MAC');
-      const negotiatedMacS2C = negotiate(client.macS2C, server.macS2C, '服务端 MAC');
-      this.macC2S = getCipherSpec(this.cipherC2S).aead ? 'none' : negotiatedMacC2S;
-      this.macS2C = getCipherSpec(this.cipherS2C).aead ? 'none' : negotiatedMacS2C;
+      this.macC2S = negotiateMac(client.macC2S, server.macC2S, '客户端 MAC', this.cipherC2S);
+      this.macS2C = negotiateMac(client.macS2C, server.macS2C, '服务端 MAC', this.cipherS2C);
       if (negotiate(client.compressionC2S, server.compressionC2S, '客户端压缩') !== 'none'
         || negotiate(client.compressionS2C, server.compressionS2C, '服务端压缩') !== 'none') {
         throw new Error('不支持 SSH 压缩');

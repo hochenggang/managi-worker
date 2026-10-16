@@ -32,6 +32,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:live": "vitest run --config vitest.live.config.ts",
     "check": "npm run typecheck && npm run test && wrangler deploy --dry-run --outdir .wrangler/build"
   },
   "devDependencies": {
