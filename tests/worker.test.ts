@@ -38,7 +38,7 @@ function makeEnv(extra: Partial<Env> = {}, assets: FakeAssets | null = defaultAs
   return {
     ASSETS: (assets === null ? undefined : assets) as unknown as Fetcher,
     MANAGI_SESSIONS: namespace as unknown as DurableObjectNamespace,
-    // 默认「公开访问」：口令已经是默认拒绝，绝大多数用例验的是路由而不是鉴权。
+    // 默认「公开访问」：绝大多数用例验的是路由而不是鉴权。
     // 需要验鉴权的用例各自覆盖 MANAGI_AUTH。
     MANAGI_AUTH: 'off',
     ...extra,
@@ -71,13 +71,18 @@ describe('访问口令', () => {
     expect(response.status).toBe(200);
   });
 
-  it('完全没配口令 → 503 并说明怎么配（默认拒绝，不再静默放行）', async () => {
-    const response = await call('/', {}, makeEnv({ MANAGI_AUTH: '' }));
-    expect(response.status).toBe(503);
-    const body = await response.json() as { error: string; hint: string };
-    expect(body.error).toContain('MANAGI_AUTH');
-    // 这时候不能弹账号密码框：问题不在密码
-    expect(response.headers.get('WWW-Authenticate')).toBeNull();
+  it('完全没配口令 → 回落到默认 admin:admin，部署即可进（不再 503）', async () => {
+    const response = await call(
+      '/', { headers: { Authorization: basicHeader('admin', 'admin') } }, makeEnv({ MANAGI_AUTH: '' }),
+    );
+    expect(response.status).toBe(200);
+  });
+
+  it('回落到默认口令时，别的口令照样进不来', async () => {
+    const response = await call(
+      '/', { headers: { Authorization: basicHeader('admin', 'nope') } }, makeEnv({ MANAGI_AUTH: '' }),
+    );
+    expect(response.status).toBe(401);
   });
 
   it('配置了口令而请求没带凭据 → 401 + Basic 挑战', async () => {

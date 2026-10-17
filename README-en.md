@@ -24,17 +24,17 @@ npx wrangler login
 npm run deploy
 ```
 
-### 2. Set an access password
+### 2. Set an access password (**change the default right after deploying**)
 
-If the deploy page shows a `MANAGI_AUTH` field, fill it in there. If you miss it or want to change it later, go to the Cloudflare dashboard → your Worker → **Settings → Variables and Secrets** → add:
+**It works without one.** When `MANAGI_AUTH` is unset (or empty) it falls back to the default **`admin` / `admin`** — open the page after deploying, type those two into the browser prompt, and you are in. A first deployment no longer looks broken.
 
-| Name | Type | Value |
-| --- | --- | --- |
-| `MANAGI_AUTH` | Secret (recommended) | `username:password`, e.g. `ops:my-long-password` |
-
-It takes effect immediately — no redeploy needed.
-
-> ⚠️ **Without this variable the service rejects everything with 503.** Deny-by-default: forgetting it once would otherwise turn your Worker into an open relay into your machines, and "just a warning in the log" does not help you.
+> ⚠️ **That default is public — anyone who has seen this project knows it.** It connects to your servers, so change it soon: Cloudflare dashboard → your Worker → **Settings → Variables and Secrets** → add
+>
+> | Name | Type | Value |
+> | --- | --- | --- |
+> | `MANAGI_AUTH` | Secret (recommended) | `username:password`, e.g. `ops:my-long-password` |
+>
+> It takes effect immediately — no redeploy needed. Changing it also invalidates every session cookie already issued.
 >
 > If you genuinely want public access (an intranet deployment, say), set it to `off` (or `none`) — that should be a decision someone types out on purpose.
 >
@@ -42,7 +42,7 @@ It takes effect immediately — no redeploy needed.
 
 ### 3. Open the page
 
-Visit `https://<your-worker>.workers.dev`. The browser will prompt for credentials — enter the password from step 2. Then fill in host, port, username and password (or a private key) in the node list on the left, and you have terminals and file management.
+Visit `https://<your-worker>.workers.dev`. The browser will prompt for credentials — enter `admin` / `admin` (or the password you changed it to). Then fill in host, port, username and password (or a private key) in the node list on the left, and you have terminals and file management.
 
 ## Run it locally
 
@@ -51,7 +51,7 @@ npm install
 npm run dev      # http://localhost:8787
 ```
 
-Locally you still need a password — the default is deny. Copy `.dev.vars.example` to `.dev.vars`, or pass one inline:
+Locally the default is the same `admin` / `admin`. To use something else, copy `.dev.vars.example` to `.dev.vars` and edit it, or pass one inline:
 
 ```bash
 npx wrangler dev --var MANAGI_AUTH:ops:s3cret
@@ -91,7 +91,7 @@ One implementation-level difference: host keys live in KV (TOFU) instead of `~/.
 - **Host key verification (TOFU)** — this is the only thing standing between you and a man-in-the-middle. Credentials are supplied per request, so connecting to an impostor means handing over your password. Defaults to `tofu`; set `HOST_KEY_MODE=off` to disable, which is only advisable while debugging.
 - **The access password has two lanes** — besides HTTP Basic Auth, a successful first authentication issues an HttpOnly signed cookie. The reason is practical: browsers do not reliably attach cached Basic credentials to a WebSocket handshake, and a 401 on `/ws` leaves a page that looks fine but can never open a terminal. The cookie value is `expiry-timestamp.HMAC(timestamp)`, keyed off `MANAGI_AUTH` — **changing the password invalidates every issued cookie**, with no revocation table required.
 - **Cross-site WebSocket hijacking is blocked** — `/ws` requires `Origin` to match its own.
-- **Deny by default** — with no `MANAGI_AUTH` the service answers 503 plus setup instructions; public access requires an explicit `off`.
+- **Default credential, meant to be changed** — with no `MANAGI_AUTH` it falls back to `admin:admin` so a first deploy just works instead of answering 503. That default is public: the log warns once and step 2 above says so up front. Public access still requires an explicit `off`.
 - **First trust is visible** — on the first connection the recorded host-key fingerprint rides back in the `open` response and is surfaced once in the UI. It used to happen silently, which is exactly where a MITM wants to sit.
 - **File transfers have exactly one path** — uploads and downloads both use the `/ws` data plane, sharing the same authenticated connection as the terminal. There is no second HTTP channel, and therefore no second set of auth, timeout and Range semantics to keep correct.
 - **Hard limits** — 16 channels per WebSocket, 10,000 directory entries (truncation is reported, not hidden), 10,000 entries when reading a directory for recursive delete or stale-part cleanup (exceeding it is an error, never a partial list), recursive delete capped at 64 levels, **10 MB per upload and per download**, 1 MB per data frame. These are not about speed: they stop one file from eating the isolate's memory or the browser tab's.
@@ -105,7 +105,7 @@ One implementation-level difference: host keys live in KV (TOFU) instead of `~/.
 | The page loads but terminals never connect, logs say "WebSocket not connected" | `/ws` failed auth. Hard-refresh the page so the browser re-runs Basic auth and picks up the session cookie. |
 | "Private/reserved address rejected as SSH target" | Working as intended. To reach an internal machine, expose it publicly (with a firewall) or open a reverse tunnel on that server. |
 | "Host key does not match the recorded one" | If the server genuinely rotated its key (reinstall, new provider), go to **Storage & Databases → KV** and delete `hostkey:example.com:22`; the next connection records it again. If you are not sure, check your network first — don't just delete it. |
-| The page answers 503 "no access password configured" | `MANAGI_AUTH` is unset and the default is deny. Set `username:password`; set `off` if you really want public access. |
+| The page prompts for credentials and you have no idea what to type | With no `MANAGI_AUTH` the default is `admin` / `admin`. Getting in means you are still on that default — **change it soon**. |
 | "First connection recorded host fingerprint …" | TOFU just pinned this host's key. Compare it with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the server. |
 | "SSH handshake timed out" | Port closed, firewall blocking, or an SSH server too old to support curve25519 / ecdh-nistp256. |
 | "Unsupported SFTP version" | The sshd SFTP subsystem is not v3; switch `Subsystem sftp` to `internal-sftp`. |

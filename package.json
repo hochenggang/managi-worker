@@ -16,7 +16,7 @@
     ],
     "bindings": {
       "MANAGI_AUTH": {
-        "description": "访问口令，格式 `用户名:密码`（例如 `ops:my-long-password`）。**请务必填写**：**留空会拒绝全部请求（默认拒绝）**；确需公开访问请显式设为 `off`。"
+        "description": "访问口令，格式 `用户名:密码`（例如 `ops:my-long-password`）。**默认 admin:admin，部署后请尽快改成自己的**；确需公开访问请显式设为 `off`。"
       },
       "MANAGI_KNOWN_HOSTS": {
         "description": "记录首次连接时信任的 SSH 主机密钥（TOFU），部署时自动创建。",
@@ -37,6 +37,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261006.1",
+    "@types/node": "^22.20.5",
     "@vitest/coverage-v8": "^3.2.7",
     "typescript": "~5.9.2",
     "vitest": "^3.2.7",

@@ -38,22 +38,25 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('checkAuth —— 未配置口令（默认拒绝）', () => {
-  it('MANAGI_AUTH 未设置 → 拒绝，并标记为 unconfigured', async () => {
-    const outcome = await checkAuth(req(), env(undefined));
-    expect(outcome.ok).toBe(false);
-    expect(outcome.failure).toBe('unconfigured');
-    expect(outcome.setCookie).toBeUndefined();
+describe('checkAuth —— 未配置口令（回落到默认 admin:admin）', () => {
+  it('没配 → 默认口令可用：admin / admin 直接进，并下发 Cookie', async () => {
+    const outcome = await checkAuth(req({ Authorization: basic('admin', 'admin') }), env(undefined));
+    expect(outcome.ok).toBe(true);
+    expect(outcome.setCookie).toBeDefined();
   });
 
-  it('空串与纯空白同样视为未配置', async () => {
-    await expect(checkAuth(req(), env(''))).resolves.toEqual({ ok: false, failure: 'unconfigured' });
-    await expect(checkAuth(req(), env('   '))).resolves.toEqual({ ok: false, failure: 'unconfigured' });
+  it('空串与纯空白同样回落（部署时填了空值也算没配）', async () => {
+    for (const value of [undefined, '', '   ']) {
+      const outcome = await checkAuth(req({ Authorization: basic('admin', 'admin') }), env(value));
+      expect(outcome.ok).toBe(true);
+    }
   });
 
-  it('带凭据也没用：没配口令时一律拒绝', async () => {
-    const outcome = await checkAuth(req({ Authorization: basic('ops', 's3cret'), Cookie: 'x=y' }), env(''));
-    expect(outcome.ok).toBe(false);
+  it('默认口令之外的凭据仍然进不来', async () => {
+    for (const [user, pass] of [['admin', 'admin1'], ['root', 'admin'], ['admin', '']] as const) {
+      const outcome = await checkAuth(req({ Authorization: basic(user, pass) }), env(''));
+      expect(outcome.ok).toBe(false);
+    }
   });
 
   it('显式设为 off / none 才开放（大小写与空白无所谓）', async () => {
@@ -62,15 +65,31 @@ describe('checkAuth —— 未配置口令（默认拒绝）', () => {
     }
   });
 
-  it('只告警一次（否则每个请求都刷一行日志）', async () => {
+  it('用默认口令时告警一次（否则每个请求都刷一行日志）', async () => {
     vi.resetModules();
-    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const fresh = await import('../src/auth');
-    await fresh.checkAuth(req(), env(undefined));
-    await fresh.checkAuth(req(), env(undefined));
-    await fresh.checkAuth(req(), env(undefined));
-    expect(error).toHaveBeenCalledTimes(1);
-    expect(String(error.mock.calls[0]?.[0])).toContain('未配置 MANAGI_AUTH');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const fresh = await import('../src/auth');
+      await fresh.checkAuth(req(), env(undefined));
+      await fresh.checkAuth(req(), env(undefined));
+      await fresh.checkAuth(req(), env(undefined));
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain('admin:admin');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('配了自己的口令就不告警', async () => {
+    vi.resetModules();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const fresh = await import('../src/auth');
+      await fresh.checkAuth(req(), env('ops:s3cret'));
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
@@ -79,16 +98,6 @@ describe('unauthorizedResponse', () => {
     const response = unauthorizedResponse();
     expect(response.status).toBe(401);
     expect(response.headers.get('WWW-Authenticate')).toContain('Basic realm=');
-  });
-
-  it('没配口令 → 503 + 配置指引，且不弹账号密码框', async () => {
-    const response = unauthorizedResponse({ ok: false, failure: 'unconfigured' });
-    expect(response.status).toBe(503);
-    // 弹框只会让人反复试密码，而问题不在密码
-    expect(response.headers.get('WWW-Authenticate')).toBeNull();
-    const body = await response.json() as { error: string; hint: string };
-    expect(body.error).toContain('MANAGI_AUTH');
-    expect(body.hint).toContain('off');
   });
 });
 

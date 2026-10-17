@@ -16,6 +16,16 @@ const COOKIE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** MANAGI_AUTH 缺冒号时用户名回退值（与 Go 的 DefaultBasicAuthUser 一致）。 */
 const DEFAULT_AUTH_USER = 'admin';
 
+/**
+ * 未配置 MANAGI_AUTH 时用的口令。
+ *
+ * 曾经这里是「默认拒绝」（503 + 提示）。纸面上更安全，实际代价是**第一次部署必定报错**：
+ * 新手看到 503 只会以为装坏了，而不会想到「少设了一个变量」。
+ * 所以默认为 admin:admin —— 部署完就能进，登录框填 admin / admin。
+ * 这也是一个众所周知的口令，日志与 README 都会提醒尽快改掉。
+ */
+const DEFAULT_AUTH = 'admin:admin';
+
 const encoder = new TextEncoder();
 
 /** 派生密钥按口令缓存：同一 isolate 内每个请求都 importKey 是白扔 CPU。 */
@@ -25,8 +35,6 @@ export interface AuthOutcome {
   ok: boolean;
   /** 需要下发的会话 Cookie（仅在本请求靠 Basic 凭据通过时给出）。 */
   setCookie?: string;
-  /** 失败类别：unconfigured 表示根本没配口令，重试多少次都没用。 */
-  failure?: 'unconfigured';
 }
 
 /** parseBasicAuth 解析 `user:pass`；空值返回 null（= 不启用鉴权）。 */
@@ -100,32 +108,33 @@ function readCookie(header: string | null, name: string): string | null {
   return null;
 }
 
-let warnedMissingSecret = false;
+let warnedDefaultSecret = false;
 
 /** 显式开放的标记值：写这些就是「我知道这条是无口令的」。 */
 const PUBLIC_MARKERS = new Set(['off', 'none']);
 
+/** 用默认口令时在日志里说一声。只一次，否则每个请求刷一行。 */
+function warnDefaultSecret(): void {
+  if (warnedDefaultSecret) return;
+  warnedDefaultSecret = true;
+  console.warn('[managi] 未配置 MANAGI_AUTH，正在使用默认口令 admin:admin。'
+    + '任何知道这个口令的人都能操作你的机器，请尽快改成自己的 `用户名:密码`。');
+}
+
 /**
  * checkAuth 判定这个请求是否通过。
  *
- * **默认拒绝**：MANAGI_AUTH 没配就不提供服务。
- * 以前这里是 fail-open（放行 + 告警一次），代价太不对称——忘配一次，
- * 这台 Worker 就成了任何人借来连你机器的跳板，而告警只在日志里闪过一行。
+ * **默认口令**：MANAGI_AUTH 没配（或设成空串）时回落到 admin:admin，
+ * 部署完就能进，不必先去控制台配一个变量。代价是这个口令是公开的 ——
+ * 日志与 README 都会提醒尽快改掉。
  * 真想公开访问，把它设成 `off`（或 `none`），那是需要主动敲下来的决定。
  */
 export async function checkAuth(request: Request, env: Env): Promise<AuthOutcome> {
   // 比对用原值：口令里的空格也是口令的一部分，不能被 trim 掉。
-  const secret = env.MANAGI_AUTH ?? '';
-  const marker = secret.trim().toLowerCase();
-  if (PUBLIC_MARKERS.has(marker)) return { ok: true };
-  if (marker === '') {
-    if (!warnedMissingSecret) {
-      warnedMissingSecret = true;
-      console.error('[managi] 未配置 MANAGI_AUTH，已拒绝全部请求。'
-        + '请把它设为 `用户名:密码`；确需公开访问再设成 off。');
-    }
-    return { ok: false, failure: 'unconfigured' };
-  }
+  const raw = env.MANAGI_AUTH ?? '';
+  if (PUBLIC_MARKERS.has(raw.trim().toLowerCase())) return { ok: true };
+  const secret = raw.trim() === '' ? DEFAULT_AUTH : raw;
+  if (secret === DEFAULT_AUTH) warnDefaultSecret();
   if (await matchesBasic(request.headers.get('Authorization'), secret)) {
     return { ok: true, setCookie: await issueCookie(request, secret) };
   }
@@ -168,20 +177,11 @@ async function issueCookie(request: Request, secret: string): Promise<string> {
 }
 
 /**
- * unauthorizedResponse 未通过鉴权时的响应。
- * 配了口令 → 401 + Basic 挑战（浏览器据此弹出账号密码框）。
- * 没配口令 → 503 + 明确指引：这时候给 401 只会让人反复试密码。
+ * unauthorizedResponse 未通过鉴权时的响应：401 + Basic 挑战，
+ * 浏览器据此弹出账号密码框。没配口令时也有默认值兜着，不会再出现
+ * 「服务端没配置」这种前端无从修复的 503。
  */
-export function unauthorizedResponse(outcome?: AuthOutcome): Response {
-  if (outcome?.failure === 'unconfigured') {
-    return new Response(JSON.stringify({
-      error: '未配置访问口令（MANAGI_AUTH），服务已拒绝请求',
-      hint: '请把 MANAGI_AUTH 设为 `用户名:密码`；确认要公开访问时设为 off。',
-    }), {
-      status: 503,
-      headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
-    });
-  }
+export function unauthorizedResponse(): Response {
   return new Response(JSON.stringify({ error: '需要访问口令' }), {
     status: 401,
     headers: {

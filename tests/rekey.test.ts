@@ -29,6 +29,7 @@ function wire(): Wiring {
   } as unknown as Socket;
   const conn = new SSHConnection(socket, {
     host: 'example.com', port: 22, username: 'root', authMethod: 'password', password: 'pw',
+    cols: 80, rows: 24, term: 'xterm-256color',
   }, hooks);
   const internals = conn as unknown as {
     phase: string;

@@ -1,4 +1,10 @@
 {
   "extends": "./tsconfig.json",
+  // 测试工程要能看见 Node 内置类型：tests/live 用真 socket（node:net / node:fs），
+  // vitest 又是 Node 进程。tsconfig.json 的 types 白名单原本只放 workers-types，
+  // 于是这些 import 一律报 TS2307 —— 本地 vitest 不做类型检查，只有 CI 会撞上。
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "node"]
+  },
   "include": ["src/**/*.ts", "tests/**/*.ts"]
 }

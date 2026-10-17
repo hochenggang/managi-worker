@@ -32,7 +32,7 @@ export default {
     const url = new URL(request.url);
     try {
       const auth = await checkAuth(request, env);
-      if (!auth.ok) return unauthorizedResponse(auth);
+      if (!auth.ok) return unauthorizedResponse();
       // /ws 只走升级：101 响应不能被重新包一层（会丢掉 webSocket 句柄），
       // 而它本身也不需要 Cookie —— 握手用的一定是已经下发过的那枚。
       if (url.pathname === '/ws') return await handleWs(request, env);
