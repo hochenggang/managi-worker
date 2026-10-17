@@ -3,11 +3,64 @@ import { concat, readUint32, writeUint32 } from './utils';
 
 const EMPTY_BUFFER = new Uint8Array(0);
 const COMPACT_CHUNKS_THRESHOLD = 32;
-const MAX_PACKET_SIZE = 256 * 1024; // 256KB - RFC 4253 section6.1 requires at least 35000 bytes
+/** SSH 层单包上限（RFC 4253 §6.1 要求至少支持 35000 字节）。与通道层的窗口片大小是两件事。 */
+const MAX_SSH_PACKET_SIZE = 256 * 1024;
 const MIN_PACKET_LENGTH = 5; // padding_length + at least 4 bytes of padding
 
 export function nextSequenceNumber(value: number): number {
   return (value + 1) >>> 0;
+}
+
+/** 解密器：commit=false 用于「只看包头」的那一趟，不推进 IV / 计数器。 */
+export type PacketDecryptor = (
+  data: Uint8Array,
+  seq: number,
+  aad?: Uint8Array,
+  commit?: boolean,
+) => Uint8Array | Promise<Uint8Array | null> | null;
+
+export type PacketMacVerifier = (packet: Uint8Array, mac: Uint8Array, seq: number) => boolean | Promise<boolean>;
+
+export type PacketEncryptor = (data: Uint8Array, seq: number, aad?: Uint8Array) => Uint8Array | Promise<Uint8Array>;
+
+export type PacketMacSigner = (packet: Uint8Array, seq: number) => Uint8Array | Promise<Uint8Array>;
+
+/**
+ * 一次解包的全部参数。
+ *
+ * 这里刻意用具名对象而不是位置参数：加 ETM 时参数已经长到「6 个值 + 3 个布尔」，
+ * 而 `nextPacket(16, decrypt, false, 32, verify, true)` 把 macLength 与 blockSize
+ * 传颠倒不会有任何类型错误 —— 只会解出乱码，再由某个下游检查报一个看不懂的错。
+ * 报文解析是安全敏感路径，每个值都必须带名字。
+ */
+export interface PacketReadOptions {
+  /** 当前入站加密的分块大小；明文阶段传 8。 */
+  blockSize: number;
+  /** 已加密时传解密器；明文阶段传恒等函数。 */
+  decrypt: PacketDecryptor;
+  /** 密码是 AEAD（GCM）：packet_length 作 AAD，密文自带 tag，没有独立 MAC。 */
+  aead?: boolean;
+  /** 非 AEAD 的 MAC 字节长度；AEAD 与明文阶段为 0。 */
+  macLength?: number;
+  /** 有 MAC 时必须给：验签回调（内部会拼 sequence_number）。 */
+  verifyMac?: PacketMacVerifier;
+  /** 这个 MAC 是 Encrypt-then-MAC 变体（OpenSSH PROTOCOL §1.5）。 */
+  encryptThenMac?: boolean;
+}
+
+/** 一次组包的全部参数，理由同上。 */
+export interface PacketWriteOptions {
+  /** 分块大小（出站密码的）。 */
+  blockSize: number;
+  /** 已加密时传加密器；明文阶段传 null。 */
+  encrypt: PacketEncryptor | null;
+  seqNum: number;
+  /** 密码是 AEAD：padding_length||payload 整体加密，长度字段明文作 AAD。 */
+  aead?: boolean;
+  /** 非 AEAD 的 MAC 回调。 */
+  mac?: PacketMacSigner;
+  /** 这个 MAC 是 EtM 变体。 */
+  encryptThenMac?: boolean;
 }
 
 export class SSHPacketParser {
@@ -114,24 +167,33 @@ export class SSHPacketParser {
     }
   }
 
-  async nextPacket(blockSize: number, decrypt: (
-    data: Uint8Array, seq: number, aad?: Uint8Array, commit?: boolean
-  ) => Uint8Array | Promise<Uint8Array | null> | null, hasAuthTag: boolean = false,
-  macLength: number = 0,
-  verifyMac?: (packet: Uint8Array, mac: Uint8Array, seq: number) => boolean | Promise<boolean>,
-  encryptThenMac: boolean = false): Promise<SSHPacket | null> {
+  async nextPacket(options: PacketReadOptions): Promise<SSHPacket | null> {
+    const {
+      blockSize,
+      decrypt,
+      aead = false,
+      macLength = 0,
+      verifyMac,
+      encryptThenMac = false,
+    } = options;
+
     if (!Number.isInteger(blockSize) || blockSize < 4) {
       throw new Error(`Invalid SSH cipher block size ${blockSize}`);
     }
+    // 声明了 MAC 却不验签，等于悄悄放弃完整性保护。这种组合只可能来自参数写错，
+    // 在这里拦住比让报文一路解到业务层再出怪错要好。
+    if (macLength > 0 && verifyMac === undefined) {
+      throw new Error('Packet MAC length is set but no verifier was provided');
+    }
 
-    if (hasAuthTag) {
+    if (aead) {
       const lengthBytes = this.peekBytes(4);
       if (!lengthBytes) return null;
 
       const packetLength = readUint32(lengthBytes, 0);
       if (packetLength < MIN_PACKET_LENGTH) throw new Error(`Packet length ${packetLength} is below the SSH minimum`);
-      if (packetLength > MAX_PACKET_SIZE) {
-        throw new Error(`Packet length ${packetLength} exceeds maximum allowed size ${MAX_PACKET_SIZE}`);
+      if (packetLength > MAX_SSH_PACKET_SIZE) {
+        throw new Error(`Packet length ${packetLength} exceeds maximum allowed size ${MAX_SSH_PACKET_SIZE}`);
       }
       // RFC 5647 section 7.2 makes packet_length AAD. The remaining
       // packetLength bytes are the AES-GCM plaintext and must be block-aligned.
@@ -186,8 +248,8 @@ export class SSHPacketParser {
 
       const packetLength = readUint32(lengthBytes, 0);
       if (packetLength < MIN_PACKET_LENGTH) throw new Error(`Packet length ${packetLength} is below the SSH minimum`);
-      if (packetLength > MAX_PACKET_SIZE) {
-        throw new Error(`Packet length ${packetLength} exceeds maximum allowed size ${MAX_PACKET_SIZE}`);
+      if (packetLength > MAX_SSH_PACKET_SIZE) {
+        throw new Error(`Packet length ${packetLength} exceeds maximum allowed size ${MAX_SSH_PACKET_SIZE}`);
       }
       // 长度字段不在密文里，所以要对齐 blockSize 的只有密文那一段。
       if (packetLength % blockSize !== 0) {
@@ -242,8 +304,8 @@ export class SSHPacketParser {
 
     const packetLength = readUint32(header, 0);
     if (packetLength < MIN_PACKET_LENGTH) throw new Error(`Packet length ${packetLength} is below the SSH minimum`);
-    if (packetLength > MAX_PACKET_SIZE) {
-      throw new Error(`Packet length ${packetLength} exceeds maximum allowed size ${MAX_PACKET_SIZE}`);
+    if (packetLength > MAX_SSH_PACKET_SIZE) {
+      throw new Error(`Packet length ${packetLength} exceeds maximum allowed size ${MAX_SSH_PACKET_SIZE}`);
     }
 
     const totalSize = 4 + packetLength;
@@ -296,42 +358,33 @@ export class SSHPacketParser {
 }
 
 export class SSHPacketBuilder {
-  static async build(
-    payload: Uint8Array,
-    blockSize: number,
-    encrypt: ((data: Uint8Array, seq: number, aad?: Uint8Array) => Uint8Array | Promise<Uint8Array>) | null,
-    seqNum: number,
-    hasAuthTag: boolean = false,
-    mac?: (packet: Uint8Array, seq: number) => Uint8Array | Promise<Uint8Array>,
-    encryptThenMac: boolean = false
-  ): Promise<Uint8Array> {
+  static async build(payload: Uint8Array, options: PacketWriteOptions): Promise<Uint8Array> {
     return SSHPacketBuilder.buildWithPayloadWriter(
       payload.length,
       (packet, offset) => packet.set(payload, offset),
-      blockSize,
-      encrypt,
-      seqNum,
-      hasAuthTag,
-      mac,
-      encryptThenMac
+      options,
     );
   }
 
   static async buildWithPayloadWriter(
     payloadLength: number,
     writePayload: (packet: Uint8Array, offset: number) => void,
-    blockSize: number,
-    encrypt: ((data: Uint8Array, seq: number, aad?: Uint8Array) => Uint8Array | Promise<Uint8Array>) | null,
-    seqNum: number,
-    hasAuthTag: boolean = false,
-    mac?: (packet: Uint8Array, seq: number) => Uint8Array | Promise<Uint8Array>,
-    encryptThenMac: boolean = false
+    options: PacketWriteOptions,
   ): Promise<Uint8Array> {
+    const {
+      blockSize,
+      encrypt,
+      seqNum,
+      aead = false,
+      mac,
+      encryptThenMac = false,
+    } = options;
+
     const packetLength = 1 + payloadLength;
     // 三种分帧的对齐对象不同：
     //   · AEAD 与 ETM：长度字段在密文外，只对齐密文段 (padding_length + payload + padding)；
     //   · 其余（RFC 4253）：长度字段也在密文里，整个 (4 + 密文段) 一起对齐。
-    const alignBase = hasAuthTag || encryptThenMac
+    const alignBase = aead || encryptThenMac
       ? (1 + payloadLength) % blockSize      // 加密段本身
       : (4 + packetLength) % blockSize;        // 整包（含 4 字节长度字段）
     const paddingNeeded = blockSize - (alignBase || blockSize);
@@ -369,7 +422,7 @@ export class SSHPacketBuilder {
         if (macBytes) result.set(macBytes, 4 + encryptedBody.length);
         return result;
       }
-      if (hasAuthTag) {
+      if (aead) {
         const lengthField = packet.subarray(0, 4);
         const dataToEncrypt = packet.subarray(4);
         const encryptedData = await encrypt(dataToEncrypt, seqNum, lengthField);

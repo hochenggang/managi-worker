@@ -16,6 +16,34 @@ export const SUPPORTED_KEX_ALGORITHMS = [
   KEX_ALGORITHM_ECDH_NISTP256,
 ];
 
+/**
+ * 密钥交换的「族」：协商是精确字符串匹配，但**实现只按族分派**。
+ *
+ * 上游把「哪些名字算 curve25519」写成 `a === 'x' || a === 'y'` 的谓词，于是每加一个
+ * 线上别名（历史上就有标准名与 libssh 旧名两个），判断逻辑与选择逻辑会各改一处，
+ * 漏改的症状是「握手谈成了，却用错实现」或者「别名谈了但没人认」。
+ * 这张表把「名字 → 实现」收成唯一事实，加别名只追加一行。
+ */
+export type KexFamily = 'curve25519' | 'ecdh-nistp256';
+
+const KEX_FAMILIES: Readonly<Record<string, KexFamily>> = {
+  [KEX_ALGORITHM_CURVE25519_SHA256]: 'curve25519',
+  [KEX_ALGORITHM_CURVE25519_SHA256_LIBSSH]: 'curve25519',
+  [KEX_ALGORITHM_ECDH_NISTP256]: 'ecdh-nistp256',
+};
+
+/** kexFamily 取算法名对应的实现族；不支持的算法抛错（不会静默落到某个默认实现）。 */
+export function kexFamily(algorithm: string): KexFamily {
+  const family = KEX_FAMILIES[algorithm];
+  if (!family) throw new Error(`Unsupported KEX algorithm: ${algorithm}`);
+  return family;
+}
+
+/** 已登记的名字集合。导出来只是为了测试能校验「偏好列表与族表不缺不多」。 */
+export function supportedKexNames(): string[] {
+  return Object.keys(KEX_FAMILIES);
+}
+
 export const SUPPORTED_ENCRYPTION_ALGORITHMS = [
   'aes128-gcm@openssh.com',
   'aes256-gcm@openssh.com',
@@ -71,9 +99,9 @@ const MAC_SPECS: Record<string, MacSpec> = {
   [MAC_ALGORITHM_HMAC_SHA2_512_ETM]: { length: 64, keyLength: 64 },
 };
 
+/** 这个名字是不是 curve25519 族 —— 报文格式与实现都按族走。 */
 export function isCurve25519KEXAlgorithm(algorithm: string): boolean {
-  return algorithm === KEX_ALGORITHM_CURVE25519_SHA256
-    || algorithm === KEX_ALGORITHM_CURVE25519_SHA256_LIBSSH;
+  return KEX_FAMILIES[algorithm] === 'curve25519';
 }
 
 /** 这个名字是不是 Encrypt-then-MAC 变体 —— 报文分帧要据此切换。 */

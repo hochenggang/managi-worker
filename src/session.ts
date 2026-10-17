@@ -344,16 +344,23 @@ export class SSHConnection {
   private async processPackets(): Promise<void> {
     while (this.phase !== 'closed') {
       // NEWKEYS 可能在同一批 TCP 字节里同时开启入站加密，故每轮重新算分帧参数。
-      const spec = this.decryptor ? getCipherSpec(this.cipherS2C) : null;
-      const macLength = this.decryptor && !spec?.aead ? getMacSpec(this.macS2C).length : 0;
-      const packet = await this.parser.nextPacket(
-        spec?.blockSize ?? 8,
-        this.decryptor ? (d, sequence, aad, commit) => this.decryptor!.decrypt(d, sequence, aad, commit) : (d) => d,
-        Boolean(spec?.aead),
-        macLength,
-        this.verifier ? (d, mac, sequence) => this.verifier!.verify(d, sequence, mac) : undefined,
-        spec !== null && isEtmMacAlgorithm(this.macS2C),
-      );
+      const encrypted = this.decryptor !== null;
+      const spec = encrypted ? getCipherSpec(this.cipherS2C) : null;
+      const aead = Boolean(spec?.aead);
+      const packet = await this.parser.nextPacket({
+        blockSize: spec?.blockSize ?? 8,
+        decrypt: encrypted
+          ? (data, sequence, aad, commit) => this.decryptor!.decrypt(data, sequence, aad, commit)
+          : (data) => data,
+        aead,
+        macLength: encrypted && !aead ? getMacSpec(this.macS2C).length : 0,
+        verifyMac: this.verifier
+          ? (data, mac, sequence) => this.verifier!.verify(data, sequence, mac)
+          : undefined,
+        // 明文阶段没有 MAC，EtM 分帧无从谈起：只按「已加密」判断，
+        // 否则 NEWKEYS 之前那几个明文包会被当成 EtM 去拆（上一轮真踩过）。
+        encryptThenMac: encrypted && isEtmMacAlgorithm(this.macS2C),
+      });
       if (!packet) return;
       await this.handlePacket(packet);
     }
@@ -679,7 +686,14 @@ export class SSHConnection {
     }
     if (type === SSH_MSG_CHANNEL_SUCCESS || type === SSH_MSG_CHANNEL_FAILURE) {
       channel.handleRequestResult(payload);
-      await handler.onRequestResult(type === SSH_MSG_CHANNEL_SUCCESS);
+      // 这里**不能 await**：SFTP 的 onRequestResult 要等 SFTP INIT/VERSION 往返，
+      // 而 VERSION 那批字节正是由这个报文循环自己消费的 —— await 等于让循环等自己，
+      // 表现为「SFTP request 0 timed out」（30s 后超时，看起来像网络问题）。
+      // PTY / exec 的 onRequestResult 只发下一个请求、不等往返，本来就不会自锁；
+      // 改成统一不阻塞后它们的行为不变（sendEncrypted 内部已按序串行）。
+      // 失败由各 handler 自己报给通道，这里只兜住回调本身抛出的意外。
+      void Promise.resolve(handler.onRequestResult(type === SSH_MSG_CHANNEL_SUCCESS))
+        .catch((error) => handler.onOpenFailure(messageOf(error)));
       return;
     }
     if (type === SSH_MSG_CHANNEL_REQUEST) {
@@ -750,12 +764,14 @@ export class SSHConnection {
       const packet = await SSHPacketBuilder.buildWithPayloadWriter(
         chunk.payloadLength,
         (target, offset) => channel.writeChannelDataPayload(target, offset, chunk.source, chunk.sourceOffset, chunk.bytesConsumed),
-        spec.blockSize,
-        (data, sequence, aad) => this.encryptor!.encrypt(data, sequence, aad),
-        this.sendSequence,
-        spec.aead,
-        this.signer ? (data, sequence) => this.signer!.sign(data, sequence) : undefined,
-        isEtmMacAlgorithm(this.macC2S),
+        {
+          blockSize: spec.blockSize,
+          encrypt: (data, sequence, aad) => this.encryptor!.encrypt(data, sequence, aad),
+          seqNum: this.sendSequence,
+          aead: spec.aead,
+          mac: this.signer ? (data, sequence) => this.signer!.sign(data, sequence) : undefined,
+          encryptThenMac: isEtmMacAlgorithm(this.macC2S),
+        },
       );
       this.sendSequence = nextSequenceNumber(this.sendSequence);
       await this.write(packet);
@@ -791,7 +807,11 @@ export class SSHConnection {
 
   private async sendPlain(payload: Uint8Array): Promise<void> {
     await this.serialSend(async () => {
-      const packet = await SSHPacketBuilder.build(payload, 8, null, this.sendSequence);
+      const packet = await SSHPacketBuilder.build(payload, {
+        blockSize: 8,
+        encrypt: null,
+        seqNum: this.sendSequence,
+      });
       this.sendSequence = nextSequenceNumber(this.sendSequence);
       await this.write(packet);
     });
@@ -802,13 +822,14 @@ export class SSHConnection {
     await this.serialSend(async () => {
       if (!this.encryptor) throw new Error('SSH 加密尚未初始化');
       const spec = getCipherSpec(this.cipherC2S);
-      const packet = await SSHPacketBuilder.build(
-        payload, spec.blockSize,
-        (data, sequence, aad) => this.encryptor!.encrypt(data, sequence, aad),
-        this.sendSequence, spec.aead,
-        this.signer ? (data, sequence) => this.signer!.sign(data, sequence) : undefined,
-        isEtmMacAlgorithm(this.macC2S),
-      );
+      const packet = await SSHPacketBuilder.build(payload, {
+        blockSize: spec.blockSize,
+        encrypt: (data, sequence, aad) => this.encryptor!.encrypt(data, sequence, aad),
+        seqNum: this.sendSequence,
+        aead: spec.aead,
+        mac: this.signer ? (data, sequence) => this.signer!.sign(data, sequence) : undefined,
+        encryptThenMac: isEtmMacAlgorithm(this.macC2S),
+      });
       this.sendSequence = nextSequenceNumber(this.sendSequence);
       await this.write(packet);
     });

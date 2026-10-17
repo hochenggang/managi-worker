@@ -18,7 +18,7 @@ import {
 } from '../src/ssh/algorithms';
 import { SSHHMAC } from '../src/ssh/crypto';
 import { KEXInitBuilder, parseKEXInit } from '../src/ssh/kex';
-import { SSHPacketBuilder, SSHPacketParser } from '../src/ssh/packet';
+import { SSHPacketBuilder, SSHPacketParser, type PacketReadOptions } from '../src/ssh/packet';
 import { concat, readUint32, writeUint32 } from '../src/ssh/utils';
 
 const BLOCK = 16;
@@ -27,6 +27,22 @@ const SEQ = 7;
 
 /** 逐字节取反当「加密」：密文与明文不同，才能断言 MAC 覆盖的到底是哪一份。 */
 const flip = async (data: Uint8Array): Promise<Uint8Array> => data.map((byte) => byte ^ 0xff);
+
+/**
+ * ETM 解包的默认参数。用例只写自己关心的那一项 ——
+ * 位置参数时代这里是 `nextPacket(BLOCK, flip, false, MAC_LEN, async () => true, true)`，
+ * 改一个值要数到第几位，现在改名字就够了。
+ */
+function etmRead(overrides: Partial<PacketReadOptions> = {}): PacketReadOptions {
+  return {
+    blockSize: BLOCK,
+    decrypt: flip,
+    macLength: MAC_LEN,
+    verifyMac: async () => true,
+    encryptThenMac: true,
+    ...overrides,
+  };
+}
 
 /** 模拟 SSHHMAC：返回定长字节，并把每次的输入原样记下来备查。 */
 function recordingMac() {
@@ -45,7 +61,9 @@ const payload = (n: number, seed = 1): Uint8Array =>
 
 async function buildEtm(data: Uint8Array, seqNum = SEQ) {
   const { mac, inputs } = recordingMac();
-  const wire = await SSHPacketBuilder.build(data, BLOCK, flip, seqNum, false, mac, true);
+  const wire = await SSHPacketBuilder.build(data, {
+    blockSize: BLOCK, encrypt: flip, seqNum, mac, encryptThenMac: true,
+  });
   return { wire, macInputs: inputs };
 }
 
@@ -156,7 +174,9 @@ describe('ETM 发送分帧的字节布局', () => {
   it('对照：传统分帧的 MAC 覆盖的是明文（含长度字段）—— 这才是 ETM 改掉的东西', async () => {
     const data = payload(20);
     const { mac, inputs } = recordingMac();
-    const legacyWire = await SSHPacketBuilder.build(data, BLOCK, flip, SEQ, false, mac, false);
+    const legacyWire = await SSHPacketBuilder.build(data, {
+      blockSize: BLOCK, encrypt: flip, seqNum: SEQ, mac,
+    });
 
     expect(inputs).toHaveLength(1);
     // 传统模式下 mac 收到的是拼好的明文整包，其中前 4 字节是长度字段。
@@ -197,7 +217,7 @@ describe('ETM 接收分帧', () => {
 
     const parser = new SSHPacketParser();
     parser.feed(wire);
-    const packet = await parser.nextPacket(BLOCK, decrypt, false, MAC_LEN, verify, true);
+    const packet = await parser.nextPacket(etmRead({ decrypt, verifyMac: verify }));
     return { packet, log, verifyInputs, verifySeqs, parser };
   }
 
@@ -233,13 +253,16 @@ describe('ETM 接收分帧', () => {
     const log: string[] = [];
     const parser = new SSHPacketParser();
     parser.feed(wire);
-    await expect(parser.nextPacket(BLOCK, async (d) => {
-      log.push('decrypt');
-      return flip(d);
-    }, false, MAC_LEN, async () => {
-      log.push('verify');
-      return false;
-    }, true)).rejects.toThrow(/Invalid packet MAC/);
+    await expect(parser.nextPacket(etmRead({
+      decrypt: async (d) => {
+        log.push('decrypt');
+        return flip(d);
+      },
+      verifyMac: async () => {
+        log.push('verify');
+        return false;
+      },
+    }))).rejects.toThrow(/Invalid packet MAC/);
     expect(log).toEqual(['verify']);
   });
 
@@ -248,7 +271,7 @@ describe('ETM 接收分帧', () => {
     for (const cut of [1, 3, 4, 5, wire.length - MAC_LEN - 1, wire.length - 1]) {
       const parser = new SSHPacketParser();
       parser.feed(wire.subarray(0, cut));
-      const packet = await parser.nextPacket(BLOCK, flip, false, MAC_LEN, async () => true, true);
+      const packet = await parser.nextPacket(etmRead());
       expect(packet, `cut=${cut}`).toBeNull();
     }
   });
@@ -258,9 +281,9 @@ describe('ETM 接收分帧', () => {
     const { wire } = await buildEtm(data);
     const parser = new SSHPacketParser();
     parser.feed(wire.subarray(0, 6));
-    expect(await parser.nextPacket(BLOCK, flip, false, MAC_LEN, async () => true, true)).toBeNull();
+    expect(await parser.nextPacket(etmRead())).toBeNull();
     parser.feed(wire.subarray(6));
-    const packet = await parser.nextPacket(BLOCK, flip, false, MAC_LEN, async () => true, true);
+    const packet = await parser.nextPacket(etmRead());
     expect(packet!.payload).toEqual(data);
   });
 
@@ -269,7 +292,7 @@ describe('ETM 接收分帧', () => {
     writeUint32(bogus, 0, BLOCK - 8);
     const parser = new SSHPacketParser();
     parser.feed(bogus);
-    await expect(parser.nextPacket(BLOCK, flip, false, MAC_LEN, async () => true, true))
+    await expect(parser.nextPacket(etmRead()))
       .rejects.toThrow(/not aligned to block size/);
   });
 
@@ -278,7 +301,7 @@ describe('ETM 接收分帧', () => {
     writeUint32(bogus, 0, 4);
     const parser = new SSHPacketParser();
     parser.feed(bogus);
-    await expect(parser.nextPacket(BLOCK, flip, false, MAC_LEN, async () => true, true))
+    await expect(parser.nextPacket(etmRead()))
       .rejects.toThrow(/below the SSH minimum/);
   });
 
@@ -289,7 +312,7 @@ describe('ETM 接收分帧', () => {
     const wire = concat(Uint32(BLOCK), cipher, new Uint8Array(MAC_LEN));
     const parser = new SSHPacketParser();
     parser.feed(wire);
-    await expect(parser.nextPacket(BLOCK, flip, false, MAC_LEN, async () => true, true))
+    await expect(parser.nextPacket(etmRead()))
       .rejects.toThrow(/Invalid padding length/);
   });
 
@@ -297,17 +320,19 @@ describe('ETM 接收分帧', () => {
     const { wire } = await buildEtm(payload(20));
     const parser = new SSHPacketParser();
     parser.feed(wire);
-    await expect(parser.nextPacket(BLOCK, flip, false, 0, undefined, true))
+    await expect(parser.nextPacket(etmRead({ macLength: 0, verifyMac: undefined })))
       .rejects.toThrow(/requires an active MAC/);
   });
 
   it('没开 ETM 时走老路：长度字段在密文里，结果同样正确', async () => {
     const data = payload(20);
     const { mac } = recordingMac();
-    const wire = await SSHPacketBuilder.build(data, BLOCK, flip, SEQ, false, mac, false);
+    const wire = await SSHPacketBuilder.build(data, {
+      blockSize: BLOCK, encrypt: flip, seqNum: SEQ, mac,
+    });
     const parser = new SSHPacketParser();
     parser.feed(wire);
-    const packet = await parser.nextPacket(BLOCK, flip, false, MAC_LEN, async () => true, false);
+    const packet = await parser.nextPacket(etmRead({ encryptThenMac: false }));
     expect(packet!.payload).toEqual(data);
   });
 });

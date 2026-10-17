@@ -4,7 +4,7 @@ import {
   SUPPORTED_KEX_ALGORITHMS,
   SUPPORTED_MAC_ALGORITHMS
 } from './algorithms';
-import { concat } from './utils';
+import { concat, encodeString, readUint32 } from './utils';
 
 export class KEXInitBuilder {
   static build(): Uint8Array {
@@ -29,18 +29,12 @@ export class KEXInitBuilder {
       '',
     ];
 
-    for (const name of algorithmLists) {
-      const encoded = new TextEncoder().encode(name);
-      const len = new Uint8Array(4);
-      new DataView(len.buffer).setUint32(0, encoded.length, false);
-      parts.push(len);
-      parts.push(encoded);
-    }
+    // 十个名字列表都是 name-list：uint32 长度 + 字节。直接用 encodeString，
+    // 别再手搓一份 setUint32 —— 上游这里就是手搓的，和 utils 里的同名逻辑重复了两套。
+    for (const name of algorithmLists) parts.push(encodeString(name));
 
     parts.push(new Uint8Array([0]));
-
-    const reserved = new Uint8Array(4);
-    parts.push(reserved);
+    parts.push(new Uint8Array(4)); // reserved
 
     return concat(...parts);
   }
@@ -57,10 +51,10 @@ export function parseKEXInit(data: Uint8Array): KEXInitMessage {
     if (offset + 4 > data.length) {
       throw new Error(`Malformed KEXINIT: truncated length field at list ${i}, offset=${offset}, dataLen=${data.length}`);
     }
-    const len = (data[offset] << 24) | (data[offset+1] << 16) |
-                (data[offset+2] << 8) | data[offset+3];
+    // readUint32 已按无符号处理，不必再挡负值；越界由下面这条统一兜住。
+    const len = readUint32(data, offset);
     offset += 4;
-    if (len < 0 || offset + len > data.length) {
+    if (offset + len > data.length) {
       throw new Error(`Malformed KEXINIT: list ${i} length ${len} exceeds packet boundary (offset=${offset}, dataLen=${data.length})`);
     }
     let name: string;
@@ -102,8 +96,7 @@ export function parseServerSigAlgs(payload: Uint8Array): string[] {
   let offset = 1; // Skip the message type.
 
   if (offset + 4 > payload.length) throw new Error('Malformed EXT_INFO extension count');
-  const nrExtensions = (payload[offset] << 24) | (payload[offset+1] << 16) |
-                       (payload[offset+2] << 8) | payload[offset+3];
+  const nrExtensions = readUint32(payload, offset);
   offset += 4;
 
   if (nrExtensions > 1024) throw new Error(`EXT_INFO extension count is too large (${nrExtensions})`);
@@ -111,8 +104,7 @@ export function parseServerSigAlgs(payload: Uint8Array): string[] {
   let serverSigAlgs: string[] = [];
   for (let i = 0; i < nrExtensions; i++) {
     if (offset + 4 > payload.length) throw new Error('Malformed EXT_INFO extension name length');
-    const nameLen = (payload[offset] << 24) | (payload[offset+1] << 16) |
-                    (payload[offset+2] << 8) | payload[offset+3];
+    const nameLen = readUint32(payload, offset);
     offset += 4;
     if (offset + nameLen > payload.length) throw new Error('Malformed EXT_INFO extension name');
     let name: string;
@@ -121,8 +113,7 @@ export function parseServerSigAlgs(payload: Uint8Array): string[] {
     offset += nameLen;
 
     if (offset + 4 > payload.length) throw new Error('Malformed EXT_INFO extension value length');
-    const valueLen = (payload[offset] << 24) | (payload[offset+1] << 16) |
-                     (payload[offset+2] << 8) | payload[offset+3];
+    const valueLen = readUint32(payload, offset);
     offset += 4;
     if (offset + valueLen > payload.length) throw new Error('Malformed EXT_INFO extension value');
     const valueBytes = payload.subarray(offset, offset + valueLen);

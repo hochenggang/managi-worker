@@ -14,6 +14,8 @@ import {
   getCipherSpec,
   getMacSpec,
   isCurve25519KEXAlgorithm,
+  kexFamily,
+  supportedKexNames,
 } from '../src/ssh/algorithms';
 import { KEXInitBuilder, filterExtInfo, negotiate, parseKEXInit } from '../src/ssh/kex';
 
@@ -71,6 +73,33 @@ describe('isCurve25519KEXAlgorithm', () => {
   it('不做前缀/模糊匹配（curve25519 开头的假名字不该蒙混过关）', () => {
     expect(isCurve25519KEXAlgorithm('curve25519-sha256@libssh.org.evil')).toBe(false);
     expect(isCurve25519KEXAlgorithm('curve25519-sha256-')).toBe(false);
+  });
+});
+
+describe('KEX 族表：名字 → 实现，只此一处', () => {
+  it('偏好列表与族表一一对应（少登记 = 协商得到却没人能实现）', () => {
+    expect([...supportedKexNames()].sort()).toEqual([...SUPPORTED_KEX_ALGORITHMS].sort());
+  });
+
+  it('偏好列表没有重复项（重复会让同一个名字被 advertise 两次）', () => {
+    expect(new Set(SUPPORTED_KEX_ALGORITHMS).size).toBe(SUPPORTED_KEX_ALGORITHMS.length);
+  });
+
+  it('两个 curve25519 名字归同一族，ECDH 单独一族', () => {
+    expect(kexFamily(KEX_ALGORITHM_CURVE25519_SHA256)).toBe('curve25519');
+    expect(kexFamily(KEX_ALGORITHM_CURVE25519_SHA256_LIBSSH)).toBe('curve25519');
+    expect(kexFamily(KEX_ALGORITHM_ECDH_NISTP256)).toBe('ecdh-nistp256');
+  });
+
+  it('未登记的算法抛错，不静默回退到某个默认实现', () => {
+    expect(() => kexFamily('diffie-hellman-group14-sha256')).toThrow(/Unsupported KEX algorithm/);
+    expect(() => kexFamily('')).toThrow(/Unsupported KEX algorithm/);
+  });
+
+  it('isCurve25519KEXAlgorithm 与族判定同源（一处改，两处同时生效）', () => {
+    for (const name of supportedKexNames()) {
+      expect(isCurve25519KEXAlgorithm(name)).toBe(kexFamily(name) === 'curve25519');
+    }
   });
 });
 
