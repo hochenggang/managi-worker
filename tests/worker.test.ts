@@ -256,6 +256,33 @@ describe('GET /ws', () => {
   });
 });
 
+// ===== GET /api/version =====
+
+describe('GET /api/version', () => {
+  it('报出 wrangler 注入的部署身份', async () => {
+    const response = await call('/api/version', {}, makeEnv({
+      CF_VERSION_METADATA: { id: 'ver-1', tag: 'v1.2.3', timestamp: '2026-10-17T03:00:00Z' },
+    }));
+    expect(response.status).toBe(200);
+    // 探针本身不能被缓存，否则看到的是上一版的答案
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    await expect(response.json()).resolves.toEqual({
+      worker: 'managi-worker',
+      deploy: { id: 'ver-1', tag: 'v1.2.3', timestamp: '2026-10-17T03:00:00Z' },
+    });
+  });
+
+  it('没有版本绑定时 deploy 为 null，不编一个假版本', async () => {
+    const response = await call('/api/version', {}, makeEnv());
+    await expect(response.json()).resolves.toEqual({ worker: 'managi-worker', deploy: null });
+  });
+
+  it('同样受口令闸保护（不该白送部署信息）', async () => {
+    const response = await call('/api/version', {}, makeEnv({ MANAGI_AUTH: 'ops:s3cret' }));
+    expect(response.status).toBe(401);
+  });
+});
+
 // ===== /api 通用规则 =====
 
 describe('/api 通用规则', () => {

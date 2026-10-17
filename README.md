@@ -93,6 +93,7 @@ npx wrangler dev --var MANAGI_AUTH:ops:s3cret
 
 | 现象 | 处理 |
 | --- | --- |
+| 修完重新部署，现象照旧 | 先访问 `/api/version`（要口令），看 `deploy.timestamp` 是不是这次部署的时间。还是旧时间就说明改动没上去——「代码没改对」和「改动没部署」从这里一眼分开，不用靠猜。 |
 | 一直弹账号密码框，怎么填都进不去 | `MANAGI_AUTH` 没配对。它是 Secret，改完等几秒生效；值必须是 `用户名:密码` 两段。 |
 | 页面能开，终端却连不上，日志报「WebSocket 未连接」 | `/ws` 没过口令。硬刷新一次页面，让浏览器重走 Basic 认证、把会话 Cookie 拿到手。 |
 | 「已禁用私网/保留地址作为 SSH 目标」 | 设计如此。要连内网机器，请把它暴露到公网（并配好防火墙），或在服务器上开个反向通道。 |
@@ -109,7 +110,7 @@ npx wrangler dev --var MANAGI_AUTH:ops:s3cret
 ```
 managi-worker/
 ├── src/
-│   ├── worker.ts          # 入口：口令闸 + /ws + 两个 /api 端点 + 静态资源兜底
+│   ├── worker.ts          # 入口：口令闸 + /ws + 三个 /api 端点 + 静态资源兜底
 │   ├── durable-object.ts  # 一条 WebSocket = 一个 DO：通道表、分发、按通道串行化
 │   ├── session.ts         # SSH 连接与三类通道：握手编排 + PTY / SFTP / exec
 │   ├── dial.ts            # 建连：全工程唯一接触 cloudflare:sockets 的地方

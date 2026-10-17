@@ -24,6 +24,11 @@ CONNECT_TIMEOUT_MS = "10000"
 #   off  —— 不校验，直接接受任何主机密钥
 HOST_KEY_MODE = "tofu"
 
+# 部署版本信息由 wrangler 自动注入，/api/version 直接读它。
+# 有了它「改了没生效」和「代码还是坏的」可以一眼区分，不必靠猜。
+[version_metadata]
+binding = "CF_VERSION_METADATA"
+
 # 一条 WebSocket = 一个 Durable Object 实例，独占这条连接上的全部 SSH 通道。
 [[durable_objects.bindings]]
 name = "MANAGI_SESSIONS"

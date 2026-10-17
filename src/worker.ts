@@ -1,6 +1,7 @@
 // Worker 入口：访问口令 + 三条入口 + 静态资源兜底。
 //
 //   GET  /ws                  → WebSocket 升级，转给一个全新的 Durable Object
+//   GET  /api/version         → 报出当前部署的版本信息（判断线上跑的是哪一版）
 //   POST /api/ssh/batch       → 多节点并发跑一段脚本，收 stdout/stderr/退出码
 //   POST /api/sftp/download   → SFTP 读远端文件，按 HTTP Range 边读边回
 //   其余                      → 交给 [assets] 绑定的静态资源（单文件 SPA）
@@ -65,6 +66,13 @@ export default {
       // 而它本身也不需要 Cookie —— 握手用的一定是已经下发过的那枚。
       if (url.pathname === '/ws') return await handleWs(request, env);
 
+      // 版本探针：线上到底跑的是哪一版，只看这一个 GET 就知道。
+      // 没有它，「改了没生效」和「代码还是坏的」这两种情况从外部无法区分。
+      if (url.pathname === '/api/version') {
+        const version = versionResponse(env);
+        return auth.setCookie ? withCookie(version, auth.setCookie) : version;
+      }
+
       let response: Response;
       if (url.pathname.startsWith('/api/')) {
         response = await handleApi(request, env, url.pathname);
@@ -85,6 +93,21 @@ function withCookie(response: Response, cookie: string): Response {
   const headers = new Headers(response.headers);
   headers.append('Set-Cookie', cookie);
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+/**
+ * versionResponse 报出这个 isolate 的部署身份。
+ * 值来自 wrangler 的 [[version_metadata]] 绑定：不依赖任何人记得改常量，
+ * 也不会因为「部署了旧提交」而谎报——它说的就是跑起来的这一份。
+ */
+function versionResponse(env: Env): Response {
+  const meta = env.CF_VERSION_METADATA;
+  return new Response(JSON.stringify({
+    worker: 'managi-worker',
+    deploy: meta ? { id: meta.id, tag: meta.tag, timestamp: meta.timestamp } : null,
+  }), {
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
+  });
 }
 
 /** handleWs 升级 WebSocket，并把它拴到一个全新的 DO 实例上（一条连接 = 一个 DO）。 */

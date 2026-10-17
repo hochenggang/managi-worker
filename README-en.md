@@ -93,6 +93,7 @@ Two implementation-level differences: host keys live in KV (TOFU) instead of `~/
 
 | Symptom | What to do |
 | --- | --- |
+| You fixed something, redeployed, and nothing changed | Hit `/api/version` (auth required) and check `deploy.timestamp`. If it still shows the old time, the change never went live — this separates "the fix is wrong" from "the fix was not deployed" without guessing. |
 | The credential prompt keeps coming back and nothing works | `MANAGI_AUTH` is wrong. It is a Secret, so give it a few seconds; the value must be `username:password`. |
 | The page loads but terminals never connect, logs say "WebSocket not connected" | `/ws` failed auth. Hard-refresh the page so the browser re-runs Basic auth and picks up the session cookie. |
 | "Private/reserved address rejected as SSH target" | Working as intended. To reach an internal machine, expose it publicly (with a firewall) or open a reverse tunnel on that server. |

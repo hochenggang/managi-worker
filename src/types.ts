@@ -53,6 +53,8 @@ export interface Env {
   CONNECT_TIMEOUT_MS?: string;
   /** tofu（默认）| off */
   HOST_KEY_MODE?: string;
+  /** wrangler 注入的部署版本信息（[[version_metadata]]）。本地 dev 也有，只是 id 是占位值。 */
+  CF_VERSION_METADATA?: { id: string; tag: string; timestamp: string };
 }
 
 export const SSH_MSG_DISCONNECT = 1;
