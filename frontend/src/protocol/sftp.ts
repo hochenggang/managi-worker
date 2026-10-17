@@ -15,6 +15,8 @@ export interface LSData {
   chan: number
   path: string
   files?: SFTPFile[]
+  /** 服务端有条目上限：true 表示只返回了前一部分，界面要如实提示。 */
+  truncated?: boolean
 }
 
 /** mkdir/rm 回声操作的 path。 */

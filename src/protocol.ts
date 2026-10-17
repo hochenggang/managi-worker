@@ -62,6 +62,10 @@ export interface CmdsTestResult {
 
 export const HEADER_LEN = 6;
 export const FLAG_END = 0x0001;
+/** 单帧载荷上限。上传分片 64KB、终端输出 32KB，1MB 已经远超任何合规客户端。 */
+export const MAX_FRAME_PAYLOAD = 1 << 20;
+/** 控制帧上限：合法报文都是几百字节，64KB 已经足够宽松。 */
+export const MAX_ENVELOPE_BYTES = 64 * 1024;
 
 export interface DataFrame {
   chan: number;
@@ -69,9 +73,15 @@ export interface DataFrame {
   payload: Uint8Array;
 }
 
-/** decodeFrame 解析一个二进制帧；长度不足帧头返回 null（字节流已错位）。 */
+/**
+ * decodeFrame 解析一个二进制帧；帧头都凑不齐就返回 null（字节流已错位）。
+ *
+ * 这里补的校验只有载荷长度：以前任意大的帧都能进来，一路 memcpy 到业务层。
+ * 未定义的标志位按 RFC 精神忽略（只认 FLAG_END），这样以后加标志不必先升服务端。
+ */
 export function decodeFrame(buf: ArrayBuffer): DataFrame | null {
   if (buf.byteLength < HEADER_LEN) return null;
+  if (buf.byteLength - HEADER_LEN > MAX_FRAME_PAYLOAD) return null;
   const view = new DataView(buf);
   return {
     chan: view.getUint32(0),
@@ -90,14 +100,27 @@ export function encodeFrame(chan: number, payload: Uint8Array, end = false): Uin
   return out;
 }
 
-/** decodeEnvelope 解析控制帧；不是本协议的 JSON 返回 null。 */
+/**
+ * decodeEnvelope 解析控制帧；不是本协议的 JSON 返回 null。
+ *
+ * 只挑出 type / data / seq 三个字段，而不是把整个对象透传：
+ * 调用方拿到的必须是我们认得的形状，多余字段没有理由跟到后面去。
+ */
 export function decodeEnvelope(text: string): Envelope | null {
+  if (text.length > MAX_ENVELOPE_BYTES) return null;
+  let parsed: unknown;
   try {
-    const obj = JSON.parse(text) as Envelope;
-    return typeof obj?.type === 'string' ? obj : null;
+    parsed = JSON.parse(text);
   } catch {
     return null;
   }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  const type = record.type;
+  if (typeof type !== 'string' || type === '' || type.length > 64) return null;
+  const seq = record.seq;
+  if (seq !== undefined && (typeof seq !== 'number' || !Number.isInteger(seq) || seq < 0)) return null;
+  return { type, data: record.data, seq: seq as number | undefined };
 }
 
 /** 通道号统一解析：前端一律把 chan 塞在 data 里。 */

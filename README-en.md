@@ -34,7 +34,9 @@ If the deploy page shows a `MANAGI_AUTH` field, fill it in there. If you miss it
 
 It takes effect immediately — no redeploy needed.
 
-> ⚠️ **Without this variable, anyone who knows your Worker URL can use it to reach your machines.** The server only logs a warning; it will not stop them for you.
+> ⚠️ **Without this variable the service rejects everything with 503.** Deny-by-default: forgetting it once would otherwise turn your Worker into an open relay into your machines, and "just a warning in the log" does not help you.
+>
+> If you genuinely want public access (an intranet deployment, say), set it to `off` (or `none`) — that should be a decision someone types out on purpose.
 >
 > If the value has no colon, the whole string is treated as the password and the username falls back to `admin` (same as the Go version).
 
@@ -49,11 +51,13 @@ npm install
 npm run dev      # http://localhost:8787
 ```
 
-Without `MANAGI_AUTH` there is no auth (a warning is logged). To exercise the auth path:
+Locally you still need a password — the default is deny. Copy `.dev.vars.example` to `.dev.vars`, or pass one inline:
 
 ```bash
 npx wrangler dev --var MANAGI_AUTH:ops:s3cret
 ```
+
+To run without auth locally, set it to `off` (never leave it unset).
 
 Scripts:
 
@@ -88,6 +92,9 @@ Two implementation-level differences: host keys live in KV (TOFU) instead of `~/
 - **The access password has two lanes** — besides HTTP Basic Auth, a successful first authentication issues an HttpOnly signed cookie. The reason is practical: browsers do not reliably attach cached Basic credentials to a WebSocket handshake, and a 401 on `/ws` leaves a page that looks fine but can never open a terminal. The cookie value is `expiry-timestamp.HMAC(timestamp)`, keyed off `MANAGI_AUTH` — **changing the password invalidates every issued cookie**, with no revocation table required.
 - **Cross-site WebSocket hijacking is blocked** — `/ws` requires `Origin` to match its own.
 - **CSRF is blocked** — both `POST` endpoints require `Sec-Fetch-Site` to be `same-origin` or `none` (absent = non-browser client, allowed through).
+- **Deny by default** — with no `MANAGI_AUTH` the service answers 503 plus setup instructions; public access requires an explicit `off`.
+- **First trust is visible** — on the first connection the recorded host-key fingerprint rides back in the `open` response and is surfaced once in the UI. It used to happen silently, which is exactly where a MITM wants to sit.
+- **Hard limits** — 10,000 directory entries (truncation is reported, not hidden), recursive delete capped at 64 levels / 10,000 entries, 2 GB per upload, 1 MB per data frame, 10 minutes per batch request. These are not about speed: they stop one request from eating the isolate's memory or the remote disk.
 
 ## Troubleshooting
 
@@ -98,6 +105,8 @@ Two implementation-level differences: host keys live in KV (TOFU) instead of `~/
 | The page loads but terminals never connect, logs say "WebSocket not connected" | `/ws` failed auth. Hard-refresh the page so the browser re-runs Basic auth and picks up the session cookie. |
 | "Private/reserved address rejected as SSH target" | Working as intended. To reach an internal machine, expose it publicly (with a firewall) or open a reverse tunnel on that server. |
 | "Host key does not match the recorded one" | If the server genuinely rotated its key (reinstall, new provider), go to **Storage & Databases → KV** and delete `hostkey:example.com:22`; the next connection records it again. If you are not sure, check your network first — don't just delete it. |
+| The page answers 503 "no access password configured" | `MANAGI_AUTH` is unset and the default is deny. Set `username:password`; set `off` if you really want public access. |
+| "First connection recorded host fingerprint …" | TOFU just pinned this host's key. Compare it with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the server. |
 | "SSH handshake timed out" | Port closed, firewall blocking, or an SSH server too old to support curve25519 / ecdh-nistp256. |
 | "Unsupported SFTP version" | The sshd SFTP subsystem is not v3; switch `Subsystem sftp` to `internal-sftp`. |
 | A `xxx.part` file is left behind after a large upload | That is a resumable-upload fragment. Resuming with the same identity (same name, size and mtime) picks it up; delete it if you no longer need it. |
@@ -110,9 +119,12 @@ Logs: Cloudflare dashboard → your Worker → **Logs** (live), or the terminal 
 ```
 managi-worker/
 ├── src/
-│   ├── worker.ts          # Entry: auth gate + /ws + two /api endpoints + asset fallback
+│   ├── worker.ts          # Entry: auth gate + /ws + three /api endpoints + asset fallback
 │   ├── durable-object.ts  # One WebSocket = one DO: channel table, dispatch, per-channel serialization
-│   ├── session.ts         # One SSH connection, three channel kinds: handshake + PTY / SFTP / exec
+│   ├── session.ts         # SSH transport: handshake, auth, channel lifecycle, public API
+│   ├── handlers.ts        # The three channel handlers: PTY / SFTP / exec
+│   ├── outbound.ts        # Serial queue for writing bytes into a channel (shared)
+│   ├── log.ts             # Structured event log (one event per line, JSON)
 │   ├── dial.ts            # Dialing: the only module in the project touching cloudflare:sockets
 │   ├── auth.ts            # Access password: Basic Auth + self-signed session cookie
 │   ├── node.ts            # Node validation and config conversion (shared by three entry points)

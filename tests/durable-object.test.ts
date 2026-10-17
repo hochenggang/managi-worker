@@ -273,6 +273,24 @@ describe('open', () => {
     expect(FakePTYHandler.created).toHaveLength(1);
   });
 
+  it('首连信任（TOFU）→ open 响应把主机指纹带回去（让它能被看见一次）', async () => {
+    const { session } = makeDO();
+    connection.hostKeyInfo = { fingerprint: 'SHA256:abc123', recorded: true };
+    FakeSFTPHandler.plan = { readyInfo: '/home/tester' };
+    await open(session, 'sftp', 3);
+    expect(ws.envelopes()).toEqual([{
+      type: 'open',
+      data: {
+        kind: 'sftp',
+        chan: 1,
+        home: '/home/tester',
+        window: FakeSFTPHandler.WINDOW,
+        host_key: { fingerprint: 'SHA256:abc123', recorded: true },
+      },
+      seq: 3,
+    }]);
+  });
+
   it('sftp 就绪 → open 响应带 chan / home / window', async () => {
     const { session } = makeDO();
     FakeSFTPHandler.plan = { readyInfo: '/home/tester' };
@@ -528,6 +546,18 @@ describe('SFTP 动词', () => {
     await session.webSocketMessage(ws, text({ type: 'ls', data: { chan: 1, path: '/tmp' }, seq: 10 }));
     await flush();
     expect(lastEnvelope()).toEqual({ type: 'ls', data: { chan: 1, path: '/tmp', files }, seq: 10 });
+  });
+
+  it('ls 被上限截断 → 带 truncated 标记', async () => {
+    const { session } = makeDO();
+    const files = [{ filename: 'a.txt', size: 1, mode: '-rw-r--r--', is_dir: false, mtime: 0 }];
+    sftpPlan({ listResult: { path: '/huge', files, truncated: true } });
+    await open(session, 'sftp');
+    await session.webSocketMessage(ws, text({ type: 'ls', data: { chan: 1, path: '/huge' }, seq: 10 }));
+    await flush();
+    expect(lastEnvelope()).toEqual({
+      type: 'ls', data: { chan: 1, path: '/huge', files, truncated: true }, seq: 10,
+    });
   });
 
   it('ls 空目录 → 省略 files 字段（与后端契约一致）', async () => {

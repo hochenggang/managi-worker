@@ -59,6 +59,8 @@ export interface OpenResponse {
   home?: string
   chunk_size?: number
   window?: number
+  /** 本次连接校验过的主机密钥。recorded=true 表示这是首次信任（TOFU 新记录）。 */
+  host_key?: { fingerprint: string; recorded: boolean }
 }
 
 /** open 请求负载。PTY 靠 session_id 复用后端 shell；SFTP 只需节点描述。 */

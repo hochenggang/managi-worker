@@ -36,6 +36,14 @@ const MAX_BATCH_NODES = 100;
 const BATCH_CONCURRENCY = 10;
 /** 单节点命令执行总时限（Go: batchExecTimeout）。到点关连接终止远端命令。 */
 const EXEC_TIMEOUT_MS = 15 * 60_000;
+/**
+ * 一次批量请求的总时长上限。
+ *
+ * 单节点 15 分钟 × 100 个节点，最坏情况下一个 HTTP 请求要挂 150 分钟：客户端早断了，
+ * Worker 还在替它跑，而且断连后没有任何人收得到结果。总量闸把它压到一个可解释的范围，
+ * 到点还没轮到的节点如实标成「未执行」，而不是假装成功。
+ */
+const BATCH_TOTAL_TIMEOUT_MS = 10 * 60_000;
 /** stdout/stderr 各自收集上限（Go: MaxExecOutputBytes）。 */
 const MAX_EXEC_OUTPUT_BYTES = 4 << 20;
 /** TCP + 密钥协商 + 认证的总预算。 */
@@ -61,7 +69,7 @@ export default {
     const url = new URL(request.url);
     try {
       const auth = await checkAuth(request, env);
-      if (!auth.ok) return unauthorizedResponse();
+      if (!auth.ok) return unauthorizedResponse(auth);
       // /ws 只走升级：101 响应不能被重新包一层（会丢掉 webSocket 句柄），
       // 而它本身也不需要 Cookie —— 握手用的一定是已经下发过的那枚。
       if (url.pathname === '/ws') return await handleWs(request, env);
@@ -173,8 +181,9 @@ async function handleBatch(request: Request, env: Env): Promise<Response> {
   }
   // 多条命令在同一个 shell 里顺序执行——这正是前端 textarea 一行的含义。
   const command = (cmds as string[]).join('\n');
+  const deadline = Date.now() + BATCH_TOTAL_TIMEOUT_MS;
   const results = await mapWithLimit(nodes as ApiNode[], BATCH_CONCURRENCY, (node) =>
-    runBatchNode(env, node, command));
+    runBatchNode(env, node, command, deadline));
   return new Response(JSON.stringify(results), {
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
   });
@@ -199,7 +208,12 @@ async function mapWithLimit<T, R>(
   return results;
 }
 
-async function runBatchNode(env: Env, node: ApiNode, command: string): Promise<CmdsTestResult> {
+async function runBatchNode(
+  env: Env,
+  node: ApiNode,
+  command: string,
+  deadline: number = Number.POSITIVE_INFINITY,
+): Promise<CmdsTestResult> {
   const started = Date.now();
   const masked = maskNode(node);
   const base: CmdsTestResult = {
@@ -215,15 +229,24 @@ async function runBatchNode(env: Env, node: ApiNode, command: string): Promise<C
     return { ...base, success: true };
   }
 
+  // 总时长已经用完：这一台根本没开始跑，如实说，别让它看起来像成功。
+  if (Date.now() >= deadline) {
+    return { ...base, error: [`批量执行总时长超过 ${BATCH_TOTAL_TIMEOUT_MS / 60_000} 分钟，该节点未执行`] };
+  }
+
   let conn: SSHConnection | null = null;
   try {
     validateNode(node);
     conn = await dialNode(env, node, { cols: 80, rows: 24, onEnded: () => undefined });
     const connection = conn;
-    await withTimeout(connection.handshake(), HANDSHAKE_TIMEOUT_MS, 'SSH 握手超时');
+    const remaining = Math.max(deadline - Date.now(), 1_000);
+    await withTimeout(connection.handshake(), Math.min(HANDSHAKE_TIMEOUT_MS, remaining), 'SSH 握手超时');
 
     let timedOut = false;
-    const result = await runExec(connection, command, () => { timedOut = true; });
+    const result = await runExec(
+      connection, command, () => { timedOut = true; },
+      Math.min(EXEC_TIMEOUT_MS, Math.max(deadline - Date.now(), 1_000)),
+    );
     if (timedOut) {
       return {
         ...base,
@@ -259,6 +282,7 @@ function runExec(
   connection: SSHConnection,
   command: string,
   onTimeout: () => void,
+  timeoutMs: number = EXEC_TIMEOUT_MS,
 ): Promise<ExecResult> {
   return new Promise<ExecResult>((resolve, reject) => {
     let settled = false;
@@ -275,7 +299,7 @@ function runExec(
       // 关连接会让通道走 onClose → finish() → settle；通道还没建起来时由下一行兜底。
       connection.close();
       settle({ stdout: '', stderr: '', exitStatus: null });
-    }, EXEC_TIMEOUT_MS);
+    }, timeoutMs);
     try {
       connection.openExec(handler);
     } catch (error) {
@@ -346,10 +370,20 @@ async function handleDownload(request: Request, env: Env): Promise<Response> {
     connection.openSFTP(handler);
     await withTimeout(opened.promise, HANDSHAKE_TIMEOUT_MS, 'SFTP 子系统握手超时');
 
-    const rangeRequested = request.headers.get('Range') !== null;
-    const offset = parseRangeStart(request.headers.get('Range'));
-    const download = await handler.download(path, offset);
-    const total = download.total;
+    // 先量一下文件有多长：没有总长就没法解析 Range（`bytes=-500` 尤其如此），
+    // 也没法给出正确的 Content-Range。多一次 stat 换掉一整套含糊语义，值。
+    const total = await handler.statSize(path);
+    const range = parseRange(request.headers.get('Range'), total);
+    if (range.kind === 'unsatisfiable') {
+      return new Response(null, {
+        status: 416,
+        headers: { 'Content-Range': `bytes */${total}`, 'Cache-Control': 'no-store' },
+      });
+    }
+    const start = range.kind === 'range' ? range.start : 0;
+    const end = range.kind === 'range' ? range.end : Math.max(total - 1, 0);
+    const download = await handler.download(path, start, end);
+    const length = total === 0 ? 0 : end - start + 1;
 
     const stream = new ReadableStream<Uint8Array>({
       start: (c) => { controller = c; },
@@ -358,30 +392,63 @@ async function handleDownload(request: Request, env: Env): Promise<Response> {
 
     const headers = new Headers({
       'Content-Type': 'application/octet-stream',
-      // 续传的响应体就是「从 offset 到文件尾」，长度按剩下的算
-      'Content-Length': String(Math.max(total - offset, 0)),
+      'Content-Length': String(length),
       'Accept-Ranges': 'bytes',
-      'Content-Range': `bytes ${offset}-${Math.max(total - 1, 0)}/${total}`,
+      'Content-Range': `bytes ${start}-${Math.max(end, 0)}/${total}`,
       'Content-Disposition': contentDisposition(download.filename),
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
     });
     // 响应头备好之后再开跑，字节才会落在这条响应上。
     download.start();
-    return new Response(stream, { status: rangeRequested ? 206 : 200, headers });
+    // 只有真的按区间发了才回 206。头写得不对但被忽略时按规范回 200 + 整份。
+    return new Response(stream, { status: range.kind === 'range' ? 206 : 200, headers });
   } catch (error) {
     try { conn?.close(); } catch { /* 已关闭 */ }
     return jsonError(messageOf(error), 502);
   }
 }
 
-/** parseRangeStart 解析 `bytes=N-`。不支持的形式（多段、后缀区间）退回整份。 */
-function parseRangeStart(header: string | null): number {
-  if (!header) return 0;
-  const match = /^\s*bytes\s*=\s*(\d+)\s*-/.exec(header);
-  if (!match) return 0;
-  const value = Number(match[1]);
-  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+export type RangeParse =
+  | { kind: 'none' }
+  | { kind: 'range'; start: number; end: number }
+  | { kind: 'unsatisfiable' };
+
+/**
+ * parseRange 解析单段 Range 请求头（RFC 9110 §14）。
+ *
+ * 三件事必须做对，否则前端续传会写出坏文件：
+ *   · `bytes=N-M` 的**终点**要认（以前只认 N-，带终点的会被当成「从 N 到文件尾」，
+ *     于是每片都收到整个文件）；
+ *   · `bytes=-N` 是「最后 N 字节」，不是「从负数开始」；
+ *   · 起止越界要回 416，而不是硬塞一个空响应让客户端以为续传成功。
+ * 多段（`bytes=0-1,5-6`）与语法错误按规范**忽略该头**，退回整份 200。
+ */
+export function parseRange(header: string | null, total: number): RangeParse {
+  if (!header) return { kind: 'none' };
+  const match = /^\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*$/i.exec(header);
+  if (!match) return { kind: 'none' };
+  const rawStart = match[1] ?? '';
+  const rawEnd = match[2] ?? '';
+  if (rawStart === '' && rawEnd === '') return { kind: 'none' };
+
+  if (rawStart === '') {
+    // bytes=-N：最后 N 字节
+    const suffix = Number(rawEnd);
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) return { kind: 'none' };
+    if (total === 0) return { kind: 'unsatisfiable' };
+    return { kind: 'range', start: Math.max(total - suffix, 0), end: total - 1 };
+  }
+
+  const start = Number(rawStart);
+  if (!Number.isSafeInteger(start) || start < 0) return { kind: 'none' };
+  if (start >= total) return { kind: 'unsatisfiable' };
+  if (rawEnd === '') return { kind: 'range', start, end: total - 1 };
+
+  const end = Number(rawEnd);
+  if (!Number.isSafeInteger(end) || end < start) return { kind: 'none' };
+  // 终点超过文件尾按文件尾算（RFC 允许），但起点都不在文件里才是 416。
+  return { kind: 'range', start, end: Math.min(end, total - 1) };
 }
 
 function contentDisposition(filename: string): string {

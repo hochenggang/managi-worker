@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   FLAG_END,
   HEADER_LEN,
+  MAX_ENVELOPE_BYTES,
+  MAX_FRAME_PAYLOAD,
   decodeEnvelope,
   decodeFrame,
   encodeFrame,
@@ -66,6 +68,13 @@ describe('encodeFrame / decodeFrame', () => {
   it('通道号按无符号解析（高位为 1 时不能变成负数）', () => {
     expect(decodeFrame(rawFrame(0xffffffff, 0, []))!.chan).toBe(0xffffffff);
   });
+
+  it('载荷超过上限直接拒绝（不让一个帧把内存吃光）', () => {
+    const oversized = new ArrayBuffer(HEADER_LEN + MAX_FRAME_PAYLOAD + 1);
+    expect(decodeFrame(oversized)).toBeNull();
+    // 恰好到上限仍然接受
+    expect(decodeFrame(new ArrayBuffer(HEADER_LEN + MAX_FRAME_PAYLOAD))).not.toBeNull();
+  });
 });
 
 describe('decodeEnvelope', () => {
@@ -93,6 +102,23 @@ describe('decodeEnvelope', () => {
     expect(decodeEnvelope('42')).toBeNull();
     expect(decodeEnvelope('{"seq":1}')).toBeNull();
     expect(decodeEnvelope('{"type":123}')).toBeNull();
+  });
+
+  it('只保留 type / data / seq，多余字段不跟到后面去', () => {
+    expect(decodeEnvelope('{"type":"ping","seq":1,"evil":"x"}')).toEqual({ type: 'ping', seq: 1 });
+  });
+
+  it('seq 必须是「非负整数」，其它形状一律拒绝', () => {
+    expect(decodeEnvelope('{"type":"ping","seq":-1}')).toBeNull();
+    expect(decodeEnvelope('{"type":"ping","seq":1.5}')).toBeNull();
+    expect(decodeEnvelope('{"type":"ping","seq":"1"}')).toBeNull();
+    expect(decodeEnvelope('{"type":"ping","seq":0}')).toEqual({ type: 'ping', seq: 0 });
+  });
+
+  it('type 为空串或过长时拒绝，超长正文也拒绝', () => {
+    expect(decodeEnvelope('{"type":""}')).toBeNull();
+    expect(decodeEnvelope(JSON.stringify({ type: 'x'.repeat(65) }))).toBeNull();
+    expect(decodeEnvelope(JSON.stringify({ type: 'ping', pad: 'x'.repeat(MAX_ENVELOPE_BYTES) }))).toBeNull();
   });
 });
 

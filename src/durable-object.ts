@@ -28,6 +28,7 @@ import {
 import { dialNode } from './dial';
 import { clampCols, clampRows, validateNode } from './node';
 import { deferred, messageOf, withTimeout } from './util';
+import { elapsedMs, logError, logInfo, logWarn } from './log';
 
 interface ChannelEntry {
   chan: number;
@@ -102,7 +103,12 @@ export class ManagiSessionDO implements DurableObject {
   }
 
   private settle(): void {
-    if (this.closed) return;
+    if (this.closed) {
+      return;
+    }
+    if (this.channels.size > 0) {
+      logInfo('do.close', { channels: this.channels.size, connections: this.connections.size });
+    }
     this.closed = true;
     this.rejectShutdown?.(new Error('连接已断开'));
     this.rejectShutdown = null;
@@ -139,6 +145,9 @@ export class ManagiSessionDO implements DurableObject {
             path: result.path,
             // 空目录省略 files：没有条目就是没有，与后端契约一致。
             ...(result.files.length > 0 ? { files: result.files } : {}),
+            // 被上限截断时必须说出来：前端据此提示「只显示了一部分」，
+            // 否则用户会以为目录里就这么多东西。
+            ...(result.truncated ? { truncated: true } : {}),
           }, seq);
         });
         return;
@@ -259,6 +268,7 @@ export class ManagiSessionDO implements DurableObject {
       return;
     }
     const target = data.node!;
+    const startedAt = Date.now();
 
     const chan = ++this.nextChan;
     // 一次 open 只报一个错。握手失败会同时从两条路冒出来（连接的 ended 回调、
@@ -320,13 +330,17 @@ export class ManagiSessionDO implements DurableObject {
           window: PTYHandler.WINDOW,
         }, seq);
       } else {
+        const hostKey = connection.getHostKeyInfo();
         this.sendControl(ws, 'open', {
           kind: 'sftp',
           chan,
           ...(home ? { home } : {}),
           window: SFTPHandler.WINDOW,
+          // 首连信任（TOFU）要能被看见：指纹随 open 回给前端，由它提示一次。
+          ...(hostKey ? { host_key: hostKey } : {}),
         }, seq);
       }
+      logInfo('do.open.ok', { kind, chan, host: target.host, port: target.port, ms: elapsedMs(startedAt) });
     } catch (error) {
       this.channels.delete(chan);
       if (conn) {
@@ -334,6 +348,7 @@ export class ManagiSessionDO implements DurableObject {
         try { conn.close(); } catch { /* 已关闭 */ }
       }
       if (settled) return; // ended 回调已经把这次失败说清楚了
+      logError('do.open.fail', { kind, host: target.host, port: target.port, ms: elapsedMs(startedAt), reason: messageOf(error) });
       settled = true;
       if (this.closed) return;
       this.sendError(ws, 0, seq, describeConnectFailure(error, target.host, target.port));
@@ -384,9 +399,27 @@ export class ManagiSessionDO implements DurableObject {
   }
 
   private sendData(ws: WebSocket, chan: number, payload: Uint8Array, end?: boolean): void {
-    if (ws.readyState !== WebSocket.OPEN) return;
+    if (this.closed) return;
+    if (ws.readyState !== WebSocket.OPEN) {
+      this.dropChannel(chan, 'ws 已关闭');
+      return;
+    }
     try {
       ws.send(encodeFrame(chan, payload, end ?? false));
-    } catch { /* 连接已断 */ }
+    } catch (error) {
+      // 写不出去就是这条通道的数据已经丢了。**不能静默**：终端会半个字符地错位、
+      // 下载会少一截，而用户看到的是「一切正常」。宁可断开并说清楚。
+      this.dropChannel(chan, messageOf(error));
+    }
+  }
+
+  /** dropChannel 放弃一条通道：断开它的 SSH 连接，往后不再往里读数据。 */
+  private dropChannel(chan: number, reason: string): void {
+    const entry = this.channels.get(chan);
+    if (!entry) return;
+    logWarn('ws.send.fail', { chan, kind: entry.kind, reason });
+    this.channels.delete(chan);
+    this.connections.delete(entry.conn);
+    try { entry.conn.close(); } catch { /* 已关闭 */ }
   }
 }

@@ -25,6 +25,8 @@ export interface AuthOutcome {
   ok: boolean;
   /** 需要下发的会话 Cookie（仅在本请求靠 Basic 凭据通过时给出）。 */
   setCookie?: string;
+  /** 失败类别：unconfigured 表示根本没配口令，重试多少次都没用。 */
+  failure?: 'unconfigured';
 }
 
 /** parseBasicAuth 解析 `user:pass`；空值返回 null（= 不启用鉴权）。 */
@@ -100,15 +102,29 @@ function readCookie(header: string | null, name: string): string | null {
 
 let warnedMissingSecret = false;
 
-/** checkAuth 判定这个请求是否通过；MANAGI_AUTH 为空即不鉴权（只告警一次）。 */
+/** 显式开放的标记值：写这些就是「我知道这条是无口令的」。 */
+const PUBLIC_MARKERS = new Set(['off', 'none']);
+
+/**
+ * checkAuth 判定这个请求是否通过。
+ *
+ * **默认拒绝**：MANAGI_AUTH 没配就不提供服务。
+ * 以前这里是 fail-open（放行 + 告警一次），代价太不对称——忘配一次，
+ * 这台 Worker 就成了任何人借来连你机器的跳板，而告警只在日志里闪过一行。
+ * 真想公开访问，把它设成 `off`（或 `none`），那是需要主动敲下来的决定。
+ */
 export async function checkAuth(request: Request, env: Env): Promise<AuthOutcome> {
+  // 比对用原值：口令里的空格也是口令的一部分，不能被 trim 掉。
   const secret = env.MANAGI_AUTH ?? '';
-  if (secret === '') {
+  const marker = secret.trim().toLowerCase();
+  if (PUBLIC_MARKERS.has(marker)) return { ok: true };
+  if (marker === '') {
     if (!warnedMissingSecret) {
       warnedMissingSecret = true;
-      console.warn('[managi] 未设置 MANAGI_AUTH：任何人都能访问这个 Worker，并借它去连你的机器');
+      console.error('[managi] 未配置 MANAGI_AUTH，已拒绝全部请求。'
+        + '请把它设为 `用户名:密码`；确需公开访问再设成 off。');
     }
-    return { ok: true };
+    return { ok: false, failure: 'unconfigured' };
   }
   if (await matchesBasic(request.headers.get('Authorization'), secret)) {
     return { ok: true, setCookie: await issueCookie(request, secret) };
@@ -151,8 +167,21 @@ async function issueCookie(request: Request, secret: string): Promise<string> {
     + `; HttpOnly; SameSite=Strict${secure}`;
 }
 
-/** unauthorizedResponse 401 + Basic 挑战，浏览器据此弹出账号密码框。 */
-export function unauthorizedResponse(): Response {
+/**
+ * unauthorizedResponse 未通过鉴权时的响应。
+ * 配了口令 → 401 + Basic 挑战（浏览器据此弹出账号密码框）。
+ * 没配口令 → 503 + 明确指引：这时候给 401 只会让人反复试密码。
+ */
+export function unauthorizedResponse(outcome?: AuthOutcome): Response {
+  if (outcome?.failure === 'unconfigured') {
+    return new Response(JSON.stringify({
+      error: '未配置访问口令（MANAGI_AUTH），服务已拒绝请求',
+      hint: '请把 MANAGI_AUTH 设为 `用户名:密码`；确认要公开访问时设为 off。',
+    }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
+    });
+  }
   return new Response(JSON.stringify({ error: '需要访问口令' }), {
     status: 401,
     headers: {

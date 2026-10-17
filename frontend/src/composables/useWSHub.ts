@@ -53,7 +53,9 @@ export interface Channel {
   /** 等输入窗口腾出 bytes 字节：上传与粘贴按服务端 ack 节流，慢链路不堆内存。
    *  断链、通道出错、摘除时立即放行，让调用方尽快回到 frame()/错误检查上。 */
   waitAck: (bytes: number) => Promise<void>
-  /** 摘除本通道：服务端随之释放其资源（PTY 的 shell 按空闲 TTL 保留，可再复用）。 */
+  /** 摘除本通道：服务端随即关掉它独占的那条 SSH 连接。
+   *  （Worker 版一路通道一条连接，关即断；Go 版才有「shell 按空闲 TTL 保留可复用」，
+   *   这里的语义已经不同，别按 Go 版的假设理解。） */
   close: () => void
 }
 

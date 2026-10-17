@@ -95,6 +95,8 @@ export class FakeConnection {
 
   closeCount = 0;
   handshakeCount = 0;
+  /** 握手时校验过的主机密钥；默认没有，用例可覆盖。 */
+  hostKeyInfo: { fingerprint: string; recorded: boolean } | null = null;
   private localId = 0;
 
   constructor(private readonly options: FakeConnectionOptions = {}) {}
@@ -102,6 +104,10 @@ export class FakeConnection {
   async handshake(): Promise<void> {
     this.handshakeCount += 1;
     if (this.options.handshakeError) throw this.options.handshakeError;
+  }
+
+  getHostKeyInfo(): { fingerprint: string; recorded: boolean } | null {
+    return this.hostKeyInfo;
   }
 
   async sendEncrypted(payload: Uint8Array): Promise<void> {
@@ -247,7 +253,7 @@ export interface FakeDownloadMeta {
  * 从 `created` 里取出实例再赋值。所以这几个值必须在**发请求之前**交出去。
  */
 export interface FakeSFTPPlan {
-  listResult?: { path: string; files: unknown[] };
+  listResult?: { path: string; files: unknown[]; truncated?: boolean };
   listError?: Error | null;
   mkdirError?: Error | null;
   removeError?: Error | null;
@@ -285,7 +291,8 @@ export class FakeSFTPHandler {
   readonly mkdirCalls: string[] = [];
   readonly removeCalls: string[] = [];
   readonly uploadCalls: Array<{ dir: string; filename: string; size: number; mtime: number }> = [];
-  readonly downloadCalls: Array<{ path: string; offset: number }> = [];
+  readonly downloadCalls: Array<{ path: string; offset: number; endOffset?: number }> = [];
+  readonly statSizeCalls: string[] = [];
   readonly written: Uint8Array[] = [];
 
   /** 目录操作的返回值 / 抛错，用例按需设置。 */
@@ -350,8 +357,19 @@ export class FakeSFTPHandler {
     return this.finishUploadSize;
   }
 
-  async download(path: string, offset = 0): Promise<{ filename: string; total: number; start: () => void }> {
-    this.downloadCalls.push({ path, offset });
+  /** statSize 与真实现对齐：Range 解析要先知道总长。 */
+  async statSize(path: string): Promise<number> {
+    this.statSizeCalls.push(path);
+    if (this.downloadError) throw this.downloadError;
+    return this.downloadMeta.total;
+  }
+
+  async download(
+    path: string,
+    offset = 0,
+    endOffset = Number.POSITIVE_INFINITY,
+  ): Promise<{ filename: string; total: number; start: () => void }> {
+    this.downloadCalls.push({ path, offset, endOffset });
     if (this.downloadError) throw this.downloadError;
     const meta = this.downloadMeta;
     return {

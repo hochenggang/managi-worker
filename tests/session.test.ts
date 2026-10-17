@@ -512,6 +512,40 @@ describe('SFTPHandler', () => {
     expect(result.files.map((file) => file.filename)).toEqual(['1', '2']);
   });
 
+  it('条目超过上限就截断，并如实标记 truncated', async () => {
+    const { handler } = await ready();
+    const limit = SFTPHandler.MAX_LIST_ENTRIES;
+    client.tree.set('/huge', Array.from({ length: limit + 5 }, (_, index) => ({
+      filename: `f${index}`,
+      attrs: fileAttrs(1),
+    })));
+    const result = await handler.list('/huge');
+    expect(result.files).toHaveLength(limit);
+    // 少给了就必须说，否则用户会以为目录里只有这么多
+    expect(result.truncated).toBe(true);
+
+    client.tree.set('/just-enough', Array.from({ length: limit }, (_, index) => ({
+      filename: `f${index}`,
+      attrs: fileAttrs(1),
+    })));
+    const exact = await handler.list('/just-enough');
+    expect(exact.files).toHaveLength(limit);
+    expect(exact.truncated).toBeUndefined();
+  });
+
+  it('递归删除超过层级上限就停手（不让一次误点变成半删状态）', async () => {
+    const { handler } = await ready();
+    const depth = SFTPHandler.MAX_REMOVE_DEPTH + 2;
+    // 造一条真正嵌套的链：/d0/d1/.../d{depth-1}
+    let path = '/d0';
+    client.tree.set(path, [{ filename: 'd1', attrs: dirAttrs() }]);
+    for (let i = 1; i < depth; i++) {
+      path = `${path}/d${i}`;
+      client.tree.set(path, i + 1 < depth ? [{ filename: `d${i + 1}`, attrs: dirAttrs() }] : []);
+    }
+    await expect(handler.remove('/d0')).rejects.toThrow(`目录层级超过 ${SFTPHandler.MAX_REMOVE_DEPTH} 层`);
+  });
+
   it('mkdir -p：绝对路径逐级创建，已存在的层级跳过', async () => {
     const { handler } = await ready();
     client.stats.set('/a', dirAttrs());
@@ -600,6 +634,16 @@ describe('SFTPHandler', () => {
     await handler.writeData(new Uint8Array(5));
     await expect(handler.finishUpload()).resolves.toBe(5);
     expect(client.renames).toEqual([{ from: 'f.bin.0-0.part', to: 'f.bin' }]);
+  });
+
+  it('上传：声明的长度超过上限直接拒绝（服务端不假设前端诚实）', async () => {
+    const { handler } = await ready();
+    client.stats.set('.', dirAttrs());
+    await expect(
+      handler.beginUpload('', 'huge.iso', SFTPHandler.MAX_UPLOAD_BYTES + 1, 0),
+    ).rejects.toThrow(`文件超过上传上限 ${SFTPHandler.MAX_UPLOAD_BYTES >> 20}MB`);
+    // 连 .part 都不该建
+    expect(client.openedFiles).toHaveLength(0);
   });
 
   it('上传：新文件从 0 开始，并按身份命名残片', async () => {

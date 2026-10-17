@@ -34,7 +34,9 @@ npm run deploy
 
 保存后立刻生效，不用重新部署。
 
-> ⚠️ **不设这个变量，任何人拿到你的 Worker 地址都能借它去连你的机器。** 服务端只会打一条警告，不会替你拦住。
+> ⚠️ **不设这个变量，服务直接拒绝全部请求（503）。** 这是默认拒绝：忘配一次，这台 Worker 就是任何人借来连你机器的跳板，而「只打一条警告」帮不了你。
+>
+> 确认就是要公开访问（比如放在内网里），把它设成 `off`（或 `none`）—— 这是需要主动敲下来的决定。
 >
 > 值里没有冒号时，整串会被当成密码，用户名回退为 `admin`（与 Go 版一致）。
 
@@ -88,6 +90,9 @@ npx wrangler dev --var MANAGI_AUTH:ops:s3cret
 - **访问口令是两道** —— 除了 HTTP Basic Auth，首次认证成功还会下发一枚 HttpOnly 的签名 Cookie。原因很实在：浏览器不保证给 WebSocket 握手带上已缓存的 Basic 凭据，而 `/ws` 一旦 401，页面看着正常却一个终端都开不出来。Cookie 值是 `过期时间戳.HMAC(时间戳)`，密钥由 `MANAGI_AUTH` 派生 —— **改口令即作废所有已发 Cookie**，服务端不需要任何撤销表。
 - **拦跨站 WebSocket 劫持** —— `/ws` 校验 `Origin` 必须与自身同源。
 - **拦 CSRF** —— 两个 `POST` 接口要求 `Sec-Fetch-Site` 为 `same-origin` / `none`（空值 = 非浏览器客户端，放行）。
+- **默认拒绝** —— `MANAGI_AUTH` 没配就不服务（503 + 配置指引），要公开访问必须显式写 `off`。
+- **首连信任要能被看见** —— TOFU 首次记录的主机指纹会随 `open` 响应回给前端，界面提示一次，让人有机会核对。之前它是静默发生的，而那正是中间人最舒服的位置。
+- **硬上限** —— 目录列表 10000 条（超出会明说「只显示了一部分」）、递归删除 64 层 / 10000 条、单文件上传 2GB、单个数据帧 1MB、批量请求总时长 10 分钟。上限不是怕慢，是挡住「一个请求把 isolate 的内存或远端磁盘吃光」。
 
 ## 故障排查
 
@@ -98,6 +103,8 @@ npx wrangler dev --var MANAGI_AUTH:ops:s3cret
 | 页面能开，终端却连不上，日志报「WebSocket 未连接」 | `/ws` 没过口令。硬刷新一次页面，让浏览器重走 Basic 认证、把会话 Cookie 拿到手。 |
 | 「已禁用私网/保留地址作为 SSH 目标」 | 设计如此。要连内网机器，请把它暴露到公网（并配好防火墙），或在服务器上开个反向通道。 |
 | 「主机密钥与记录不一致」 | 服务器真换过密钥（重装系统、换主机商）就去 **Storage & Databases → KV** 删掉键 `hostkey:example.com:22`，下次连接重新记录；不确定就先确认网络环境，别急着删。 |
+| 打开页面直接 503「未配置访问口令」 | `MANAGI_AUTH` 没设，服务默认拒绝。设成 `用户名:密码`；确认要公开访问就设成 `off`。 |
+| 「首次连接已记录主机指纹 …」 | TOFU 第一次连接这台机器，刚把指纹记下来。核对一下与服务器 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 是否一致即可。 |
 | 「SSH 握手超时」 | 端口不通、防火墙拦了，或对端 SSH 太老（不支持 curve25519 / ecdh-nistp256）。 |
 | 「不支持的 SFTP 版本」 | sshd 的 SFTP 子系统不是 v3；把 `Subsystem sftp` 换成 `internal-sftp` 即可。 |
 | 上传大文件后目录里留下 `xxx.part` | 那是断点续传的残片。同身份（同名同大小同修改时间）续传会接上；确认不要就直接删。 |
@@ -112,6 +119,10 @@ managi-worker/
 ├── src/
 │   ├── worker.ts          # 入口：口令闸 + /ws + 三个 /api 端点 + 静态资源兜底
 │   ├── durable-object.ts  # 一条 WebSocket = 一个 DO：通道表、分发、按通道串行化
+│   ├── session.ts         # SSH 传输编排：握手、认证、通道生命周期、对外 API
+│   ├── handlers.ts        # 三种通道处理器：PTY / SFTP / exec
+│   ├── outbound.ts        # 往通道写字节的串行队列（PTY 与 SFTP 共用）
+│   ├── log.ts             # 结构化事件日志（一条事件一行 JSON）
 │   ├── session.ts         # SSH 连接与三类通道：握手编排 + PTY / SFTP / exec
 │   ├── dial.ts            # 建连：全工程唯一接触 cloudflare:sockets 的地方
 │   ├── auth.ts            # 访问口令：Basic Auth + 自签名会话 Cookie

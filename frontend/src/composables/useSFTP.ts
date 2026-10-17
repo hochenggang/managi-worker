@@ -45,10 +45,17 @@ export function useSFTP(node: ApiNode) {
   let expectedTotal = 0
   let downloadName = 'download'
   let openedOnce = false
+  let hostKeyWarned = false
 
   const channel = hub.attach({
     openData: (): OpenSFTP => ({ kind: 'sftp', node }),
     onOpen: (resp: OpenResponse) => {
+      // 首连信任（TOFU）是静默发生的，而这正是中间人最舒服的位置。
+      // 把刚记下的指纹亮一次，让用户有机会核对；只提示一次，不反复打扰。
+      if (resp.host_key?.recorded && !hostKeyWarned) {
+        hostKeyWarned = true
+        handleError(`首次连接已记录主机指纹 ${resp.host_key.fingerprint}，请核对是否与该服务器一致`)
+      }
       // 首开用服务端报的 home：硬编码 '/' 会让没有根目录读权限的账号一进来就报错。
       // 重连后回到用户当前所在目录，而不是把他弹回主目录。
       const target = openedOnce ? currentPath.value : resp.home || '/'
@@ -147,6 +154,8 @@ export function useSFTP(node: ApiNode) {
       const d = await channel.request<LSData>('ls', { path })
       files.value = d?.files ?? []
       currentPath.value = d?.path || path
+      // 服务端有条目上限。不说出来的话，用户会以为目录里就这么多东西。
+      if (d?.truncated) handleError('目录条目过多，只显示了前一部分；请用终端查看全部')
     } finally {
       loading.value = false
     }

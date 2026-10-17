@@ -1,0 +1,39 @@
+name: CI
+
+# 之前 500 多项测试全靠人手跑。加了 CI 之后，「改坏了」在推上来那一刻就能看见，
+# 而不是等部署完、用户在页面上撞见。真机测试需要账号，故不在此处跑；
+# 它由开发者用 `npm run test:live` 在本机触发。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # 根目录依赖（vitest / typescript / wrangler）
+      - run: npm ci
+
+      # 前端是独立的依赖树，构建脚本会在缺失时自行安装；CI 里显式装一次，
+      # 免得缓存把「装过一半」的状态带进下一步。
+      - name: 安装前端依赖
+        run: npm --prefix frontend ci
+
+      - name: 类型检查（含测试）
+        run: npm run typecheck
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 试打包（确认 Worker 能被 wrangler 构建）
+        run: npx wrangler deploy --dry-run --outdir .wrangler/build
+        env:

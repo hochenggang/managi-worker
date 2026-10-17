@@ -58,6 +58,9 @@ function makeEnv(extra: Partial<Env> = {}, assets: FakeAssets | null = defaultAs
   return {
     ASSETS: (assets === null ? undefined : assets) as unknown as Fetcher,
     MANAGI_SESSIONS: namespace as unknown as DurableObjectNamespace,
+    // 默认「公开访问」：口令已经是默认拒绝，绝大多数用例验的是路由而不是鉴权。
+    // 需要验鉴权的用例各自覆盖 MANAGI_AUTH。
+    MANAGI_AUTH: 'off',
     ...extra,
   } as unknown as Env;
 }
@@ -94,9 +97,18 @@ afterEach(() => {
 // ===== 口令闸 =====
 
 describe('访问口令', () => {
-  it('未配置口令时直接放行', async () => {
-    const response = await call('/', {}, makeEnv());
+  it('口令设为 off 时放行（显式开放）', async () => {
+    const response = await call('/', {}, makeEnv({ MANAGI_AUTH: 'off' }));
     expect(response.status).toBe(200);
+  });
+
+  it('完全没配口令 → 503 并说明怎么配（默认拒绝，不再静默放行）', async () => {
+    const response = await call('/', {}, makeEnv({ MANAGI_AUTH: '' }));
+    expect(response.status).toBe(503);
+    const body = await response.json() as { error: string; hint: string };
+    expect(body.error).toContain('MANAGI_AUTH');
+    // 这时候不能弹账号密码框：问题不在密码
+    expect(response.headers.get('WWW-Authenticate')).toBeNull();
   });
 
   it('配置了口令而请求没带凭据 → 401 + Basic 挑战', async () => {
@@ -236,6 +248,7 @@ describe('GET /ws', () => {
         get: () => ({ fetch: async (request: Request) => { forwarded = request; return upgradeResponse(); } }),
         newUniqueId: () => 'unique-id',
       },
+      MANAGI_AUTH: 'off',
     } as unknown as Env;
     await call('/ws', { headers: { ...upgrade, Authorization: BASIC, Cookie: 'managi_auth=abc' } }, env);
     expect(forwarded).not.toBeNull();
@@ -248,7 +261,7 @@ describe('GET /ws', () => {
   it('每次升级都拿一个新的 DO 实例（一条连接一个会话）', async () => {
     const newUniqueId = vi.fn(() => 'unique-id');
     const get = vi.fn(() => ({ fetch: async () => upgradeResponse() }));
-    const env = { ASSETS: defaultAssets(), MANAGI_SESSIONS: { get, newUniqueId } } as unknown as Env;
+    const env = { ASSETS: defaultAssets(), MANAGI_SESSIONS: { get, newUniqueId }, MANAGI_AUTH: 'off' } as unknown as Env;
     await call('/ws', { headers: upgrade }, env);
     await call('/ws', { headers: upgrade }, env);
     expect(newUniqueId).toHaveBeenCalledTimes(2);
@@ -595,19 +608,54 @@ describe('POST /api/sftp/download', () => {
     expect((await response.arrayBuffer()).byteLength).toBe(6);
   });
 
-  it('不认识的 Range 形式退回整份（内容仍然完整，只是标了 206）', async () => {
+  // 之前这里只认 `bytes=N-`：带上终点的请求被当成「从 N 到文件尾」，
+  // 分包续传的每一片都会收到整个文件 —— 拼出来的文件必然错位。
+  it('bytes=N-M 只推这一段（终点必须被尊重）', async () => {
+    const { response, handler } = await prepare(fileMeta('report.csv', 10, [5]), undefined, { Range: 'bytes=2-6' });
+    expect(response.status).toBe(206);
+    expect(handler.downloadCalls[0]).toMatchObject({ offset: 2, endOffset: 6 });
+    expect(response.headers.get('Content-Length')).toBe('5');
+    expect(response.headers.get('Content-Range')).toBe('bytes 2-6/10');
+    expect((await response.arrayBuffer()).byteLength).toBe(5);
+  });
+
+  it('bytes=-N 是「最后 N 字节」，不是从负数开始', async () => {
+    const { response, handler } = await prepare(fileMeta('report.csv', 10, [4]), undefined, { Range: 'bytes=-4' });
+    expect(response.status).toBe(206);
+    expect(handler.downloadCalls[0]).toMatchObject({ offset: 6, endOffset: 9 });
+    expect(response.headers.get('Content-Range')).toBe('bytes 6-9/10');
+    expect((await response.arrayBuffer()).byteLength).toBe(4);
+  });
+
+  it('终点超过文件尾按文件尾算（RFC 允许）', async () => {
+    const beyond = await prepare(fileMeta('report.csv', 4, [4]), undefined, { Range: 'bytes=2-999' });
+    expect(beyond.response.status).toBe(206);
+    expect(beyond.response.headers.get('Content-Range')).toBe('bytes 2-3/4');
+  });
+
+  it('起点越界 → 416 + `bytes */total`，且不去开文件', async () => {
+    const invalid = await prepare(fileMeta('report.csv', 4, []), undefined, { Range: 'bytes=9-' });
+    expect(invalid.response.status).toBe(416);
+    // 416 必须带 `bytes */total`，客户端才知道真实长度
+    expect(invalid.response.headers.get('Content-Range')).toBe('bytes */4');
+    expect(invalid.handler.statSizeCalls).toEqual(['/tmp/report.csv']);
+    expect(invalid.handler.downloadCalls).toHaveLength(0);
+  });
+
+  it('不认识的 Range 形式按规范忽略该头：回 200 + 整份', async () => {
     const { response, handler } = await prepare(fileMeta('report.csv', 3, [3]), undefined, { Range: 'items=1-2' });
     expect(handler.downloadCalls[0]!.offset).toBe(0);
-    expect(response.status).toBe(206);
+    expect(response.status).toBe(200);
     expect(response.headers.get('Content-Length')).toBe('3');
     expect((await response.arrayBuffer()).byteLength).toBe(3);
   });
 
-  it('Range 偏移大到超出安全整数 → 退回整份（不拿一个会被静默取整的数去读文件）', async () => {
+  it('Range 偏移大到超出安全整数 → 忽略该头，退回整份（不拿会被静默取整的数去读文件）', async () => {
     const { response, handler } = await prepare(fileMeta('report.csv', 3, [3]), undefined, {
       Range: 'bytes=99999999999999999999-',
     });
     expect(handler.downloadCalls[0]!.offset).toBe(0);
+    expect(response.status).toBe(200);
     expect(response.headers.get('Content-Range')).toBe('bytes 0-2/3');
     await response.arrayBuffer();
   });

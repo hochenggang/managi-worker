@@ -1,1 +1,5 @@
-MANAGI_AUTH=
+# 本地 wrangler dev 用的变量。复制成 .dev.vars 再改（.dev.vars 已被 gitignore）。
+#
+# 格式是 `用户名:密码`。空着会被拒绝（默认拒绝）；要无口令访问就写 off。
+# 这里给的是本地开发值，别照抄到线上。
+MANAGI_AUTH=dev:dev
