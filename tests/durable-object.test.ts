@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // DO 是本项目「浏览器 ↔ SSH」的拼接处：通道表、控制动词分发、数据帧投递、同通道串行化。
-// 这里把 dial 与三个通道处理器整体换掉 —— 验收的是分发规则与生命周期收尾，
+// 这里把 dial 与通道处理器整体换掉 —— 验收的是分发规则与生命周期收尾，
 // SSH 协议栈本身由 src/ssh/ 负责（那部分要真实服务端才有意义）。
 const mocks = vi.hoisted(() => ({ dialNode: vi.fn() }));
 
@@ -16,16 +16,16 @@ vi.mock('../src/session', async (importOriginal) => {
   return {
     ...actual,
     SSHConnection: FakeConnection,
-    ExecHandler: FakeExecHandler,
     PTYHandler: FakePTYHandler,
     SFTPHandler: FakeSFTPHandler,
+    ExecHandler: FakeExecHandler,
   };
 });
 
 import { ManagiSessionDO } from '../src/durable-object';
 import { encodeFrame } from '../src/protocol';
 import type { Env } from '../src/types';
-import { FakeConnection, FakePTYHandler, FakeSFTPHandler, type FakeSFTPPlan } from './fakes';
+import { FakeConnection, FakeExecHandler, FakePTYHandler, FakeSFTPHandler, type FakeSFTPPlan } from './fakes';
 import { FakeWebSocket } from './setup';
 
 const NODE = { host: '1.2.3.4', port: 22, username: 'root', auth_type: 'password', auth_value: 'pw' };
@@ -37,15 +37,44 @@ interface Harness {
   /** acceptWebSocket 收到的那些「服务端那半」。 */
   accepted: FakeWebSocket[];
   state: DurableObjectState;
+  /** 连接建立时服务端主动报的身份帧（随后清空发件箱，让用例从「干净的一页」开始）。 */
+  hello: Record<string, unknown> | null;
 }
 
-function makeDO(stale: FakeWebSocket[] = []): Harness {
+function makeDO(stale: FakeWebSocket[] = [], options: { connect?: boolean } = {}): Harness {
   const accepted: FakeWebSocket[] = [];
   const state = {
     getWebSockets: () => stale,
     acceptWebSocket: (ws: FakeWebSocket) => { accepted.push(ws); },
   } as unknown as DurableObjectState;
-  return { session: new ManagiSessionDO(state, {} as Env), accepted, state };
+  const session = new ManagiSessionDO(state, {} as Env);
+  let hello: Record<string, unknown> | null = null;
+  if (options.connect !== false) {
+    // fetch 在第一个 await 之前就把这条 socket 登记成 activeWs（并发出 hello），
+    // 所以这里可以同步跑完再取服务端那半。不登记的话，后续每一帧都会被
+    // 「不是当前连接」的闸门挡掉 —— 那测的就不是分发了。
+    void withUpgradeStatus(() => session.fetch(wsRequest())).catch(() => undefined);
+    ws = accepted[0] as unknown as TestSocket;
+    hello = accepted[0].envelopes()[0] ?? null;
+    // hello 是连接建立时的固定开销，清掉它，断言才不必为它让位。
+    accepted[0].sent.length = 0;
+  }
+  return { session, accepted, state, hello };
+}
+
+/** wsRequest 造一个只被 DO 读 url 与 Upgrade 头的请求（Node 的 Headers 会拒绝 Upgrade 这类受限头）。 */
+function wsRequest(): Request {
+  return {
+    url: 'https://session.internal/connect',
+    headers: { get: (name: string) => (name.toLowerCase() === 'upgrade' ? 'websocket' : null) },
+  } as unknown as Request;
+}
+
+/** connect 模拟浏览器断开/重连：旧 socket 换新，DO 由 client_id 决定还是同一个。 */
+async function reconnect(session: ManagiSessionDO): Promise<void> {
+  await withUpgradeStatus(() => session.fetch(wsRequest()));
+  ws = (session as unknown as { activeWs: TestSocket }).activeWs;
+  ws.sent.length = 0; // hello 已单独验过，这里从干净的一页开始
 }
 
 /** flush 把挂起的微任务与任务链排空（链上的任务全部是 microtask 驱动）。 */
@@ -66,6 +95,7 @@ let connection: FakeConnection;
 
 beforeEach(() => {
   FakePTYHandler.reset();
+  FakeExecHandler.reset();
   FakeSFTPHandler.reset();
   ws = newSocket();
   connection = new FakeConnection();
@@ -74,8 +104,8 @@ beforeEach(() => {
 });
 
 /** open 发一个 open 动词并等它落地（已就绪时 webSocketMessage 会在就绪后才返回）。 */
-async function open(session: ManagiSessionDO, kind: 'pty' | 'sftp', seq = 1): Promise<void> {
-  await session.webSocketMessage(ws, text({ type: 'open', data: { kind, node: NODE }, seq }));
+async function open(session: ManagiSessionDO, kind: 'pty' | 'sftp' | 'exec', seq = 1, extra: Record<string, unknown> = {}): Promise<void> {
+  await session.webSocketMessage(ws, text({ type: 'open', data: { kind, node: NODE, ...extra }, seq }));
 }
 
 const lastEnvelope = (): Record<string, unknown> => ws.envelopes().at(-1)!;
@@ -109,7 +139,7 @@ async function withUpgradeStatus<T>(run: () => Promise<T>): Promise<T> {
 describe('构造', () => {
   it('实例重启时把残留的 WebSocket 以 1012 关掉（内存里的 SSH 状态已经没了）', () => {
     const stale = new FakeWebSocket();
-    makeDO([stale]);
+    makeDO([stale], { connect: false });
     expect(stale.closes).toEqual([{ code: 1012, reason: 'Worker 会话已重启，请重新连接' }]);
     expect(stale.readyState).toBe(FakeWebSocket.CLOSED);
   });
@@ -129,19 +159,19 @@ describe('构造', () => {
 
 describe('fetch', () => {
   it('非 /connect → 404', async () => {
-    const { session } = makeDO();
+    const { session } = makeDO([], { connect: false });
     const response = await session.fetch(new Request('https://session.internal/nope'));
     expect(response.status).toBe(404);
   });
 
   it('没有 Upgrade 头 → 426', async () => {
-    const { session } = makeDO();
+    const { session } = makeDO([], { connect: false });
     const response = await session.fetch(new Request('https://session.internal/connect'));
     expect(response.status).toBe(426);
   });
 
   it('Upgrade 大小写不敏感', async () => {
-    const { session, accepted } = makeDO();
+    const { session, accepted } = makeDO([], { connect: false });
     await withUpgradeStatus(async () => {
       const response = await session.fetch(new Request('https://session.internal/connect', {
         headers: { Upgrade: 'WebSocket' },
@@ -152,7 +182,7 @@ describe('fetch', () => {
   });
 
   it('升级成功 → 101，服务端那半交给 acceptWebSocket、客户端那半回给调用方', async () => {
-    const { session, accepted } = makeDO();
+    const { session, accepted } = makeDO([], { connect: false });
     await withUpgradeStatus(async () => {
       const response = await session.fetch(new Request('https://session.internal/connect', {
         headers: { Upgrade: 'websocket' },
@@ -199,7 +229,7 @@ describe('webSocketMessage —— 短信封', () => {
 
   it('会话已关闭后什么也不做（连错误都不回）', async () => {
     const { session } = makeDO();
-    await session.webSocketClose();
+    await session.webSocketClose(ws);
     await session.webSocketMessage(ws, text({ type: 'ping', seq: 1 }));
     expect(ws.envelopes()).toEqual([]);
   });
@@ -233,12 +263,12 @@ describe('webSocketMessage —— 短信封', () => {
 // ===== open =====
 
 describe('open', () => {
-  it('kind 只能是 pty / sftp', async () => {
+  it('kind 只能是 pty / exec / sftp', async () => {
     const { session } = makeDO();
     await session.webSocketMessage(ws, text({ type: 'open', data: { kind: 'shell', node: NODE }, seq: 4 }));
     expect(lastEnvelope()).toEqual({
       type: 'error',
-      data: { message: 'open: kind 必须是 "pty" 或 "sftp"，收到 shell' },
+      data: { message: 'open: kind 必须是 "pty" / "exec" / "sftp"，收到 shell' },
       seq: 4,
     });
     expect(mocks.dialNode).not.toHaveBeenCalled();
@@ -249,7 +279,7 @@ describe('open', () => {
     await session.webSocketMessage(ws, text({ type: 'open', seq: 4 }));
     expect(lastEnvelope()).toEqual({
       type: 'error',
-      data: { message: 'open: kind 必须是 "pty" 或 "sftp"，收到 undefined' },
+      data: { message: 'open: kind 必须是 "pty" / "exec" / "sftp"，收到 undefined' },
       seq: 4,
     });
     expect(mocks.dialNode).not.toHaveBeenCalled();
@@ -326,6 +356,37 @@ describe('open', () => {
     expect(chans).toEqual([1, 2]);
   });
 
+  it('单条连接最多 16 路通道，超出直接拒绝（不设限等于让一个客户端吃光连接额度）', async () => {
+    const { session } = makeDO();
+    mocks.dialNode.mockImplementation(async () => new FakeConnection());
+    for (let seq = 1; seq <= 16; seq++) await open(session, 'pty', seq);
+    expect(mocks.dialNode).toHaveBeenCalledTimes(16);
+
+    await session.webSocketMessage(ws, text({ type: 'open', data: { kind: 'pty', node: NODE }, seq: 17 }));
+    expect(lastEnvelope()).toEqual({
+      type: 'error',
+      data: { message: '通道数已达上限（16 个），请先关闭一个标签' },
+      seq: 17,
+    });
+    // 被拒的这次不该去连机器
+    expect(mocks.dialNode).toHaveBeenCalledTimes(16);
+
+    // 关掉一个就腾出位置：上限不是「一次性额度」
+    await session.webSocketMessage(ws, text({ type: 'close', data: { chan: 1 }, seq: 18 }));
+    await open(session, 'pty', 19);
+    expect(mocks.dialNode).toHaveBeenCalledTimes(17);
+  });
+
+  it('失败的 open 不占用通道名额（否则连点几次就把自己锁死）', async () => {
+    const { session } = makeDO();
+    mocks.dialNode.mockRejectedValue(new Error('TCP 连接超时'));
+    for (let seq = 1; seq <= 20; seq++) await open(session, 'pty', seq);
+
+    mocks.dialNode.mockImplementation(async () => new FakeConnection());
+    await open(session, 'pty', 21);
+    expect(lastEnvelope()).toMatchObject({ type: 'open', data: { kind: 'pty', chan: 21 } });
+  });
+
   it('建连失败 → error 用「主机:端口 — 原因」，并把本次 open 的 seq 带上', async () => {
     const { session } = makeDO();
     mocks.dialNode.mockRejectedValue(new Error('TCP 连接超时'));
@@ -383,7 +444,7 @@ describe('open', () => {
     }]);
 
     // 关掉会话，把还挂在 opened 上的那次 open 放走。
-    await session.webSocketClose();
+    await session.webSocketClose(ws);
     await pending;
     expect(ws.envelopes()).toHaveLength(1);
   });
@@ -743,39 +804,39 @@ describe('同通道任务链', () => {
 // ===== 会话收尾 =====
 
 describe('会话收尾', () => {
-  it('WS 关闭 → 所有 SSH 连接被收掉', async () => {
+  it('WS 关闭 → sftp 连接立刻收掉（它绑在通道上）', async () => {
     const { session } = makeDO();
-    const first = new FakeConnection();
-    const second = new FakeConnection();
-    mocks.dialNode.mockImplementation(async () => first);
-    await open(session, 'pty', 1);
-    mocks.dialNode.mockImplementation(async () => second);
-    await open(session, 'sftp', 2);
+    await open(session, 'sftp', 1);
+    await session.webSocketClose(ws);
+    expect(connection.closeCount).toBe(1);
+  });
 
-    await session.webSocketClose();
-    expect(first.closeCount).toBe(1);
-    expect(second.closeCount).toBe(1);
+  it('WS 关闭 → pty 连接留着（shell 还能被重连接回来）', async () => {
+    const { session } = makeDO();
+    await open(session, 'pty', 1);
+    await session.webSocketClose(ws);
+    expect(connection.closeCount).toBe(0);
   });
 
   it('WS 报错 → 与正常关闭同样收尾', async () => {
     const { session } = makeDO();
-    await open(session, 'pty');
-    await session.webSocketError();
+    await open(session, 'sftp');
+    await session.webSocketError(ws);
     expect(connection.closeCount).toBe(1);
   });
 
   it('重复收尾只做一次（close 与 error 可能接连到来）', async () => {
     const { session } = makeDO();
-    await open(session, 'pty');
-    await session.webSocketClose();
-    await session.webSocketError();
+    await open(session, 'sftp');
+    await session.webSocketClose(ws);
+    await session.webSocketError(ws);
     expect(connection.closeCount).toBe(1);
   });
 
   it('收尾之后浏览器再发控制帧与数据帧都无响应', async () => {
     const { session } = makeDO();
     await open(session, 'sftp');
-    await session.webSocketClose();
+    await session.webSocketClose(ws);
     await session.webSocketMessage(ws, text({ type: 'ping', seq: 1 }));
     await session.webSocketMessage(ws, encodeFrame(1, new Uint8Array([1])).buffer as ArrayBuffer);
     await flush();
@@ -788,7 +849,7 @@ describe('会话收尾', () => {
     mocks.dialNode.mockResolvedValue(half);
     const pending = session.webSocketMessage(ws, text({ type: 'open', data: { kind: 'pty', node: NODE }, seq: 1 }));
     await flush();
-    await session.webSocketClose();
+    await session.webSocketClose(ws);
     await pending;
     expect(ws.envelopes()).toEqual([]);
   });
@@ -801,12 +862,138 @@ describe('会话收尾', () => {
       return connection;
     });
     await open(session, 'pty', 1);
-    await session.webSocketClose();
+    await session.webSocketClose(ws);
     // workerd 触发 close 回调时这条 socket 已经写不了了 —— 替身要跟着变成 CLOSED，
     // 否则测的是替身的宽容度，而不是 DO 自己的 readyState 闸。
     ws.readyState = FakeWebSocket.CLOSED;
     ws.sent.length = 0;
     ended!(new Error('远端断开'));
     expect(ws.sent).toEqual([]);
+  });
+});
+
+// ===== 连接身份与 exec 通道 =====
+
+describe('hello', () => {
+  // 跨端契约：字段名与嵌套形状必须与 Go 版逐字一致
+  // （managi-v3/backend/internal/handler/chan_exec_test.go 里有一份同样的字面量）。
+  // 用 toEqual 而不是 toMatchObject：多一个或少一个键都要红——解析方默默吞掉拼错的键名，
+  // 两边各自「测试通过」而线上对不上，是最难查的一类故障。
+  it('连上就报协议号与各项上限（前端据此判断服务端版本）', () => {
+    const { hello } = makeDO();
+    expect(hello).toEqual({
+      type: 'hello',
+      data: {
+        protocol: 2,
+        backend: 'worker',
+        limits: {
+          max_channels: 16,
+          max_file_bytes: 10485760,
+          max_list_entries: 10000,
+          max_remove_depth: 64,
+          max_exec_output: 4194304,
+          pty_idle_ttl_ms: 60000,
+        },
+      },
+    });
+  });
+});
+
+describe('exec 通道', () => {
+  it('open exec → 响应带 chan，命令原样交给 SSH 层', async () => {
+    const { session } = makeDO();
+    await open(session, 'exec', 5, { command: 'uptime' });
+    expect(lastEnvelope()).toEqual({ type: 'open', data: { kind: 'exec', chan: 1 }, seq: 5 });
+    expect(FakeExecHandler.created[0].command).toBe('uptime');
+    // 响应先出、输出后放：start() 必须在响应之后才被调用。
+    expect(FakeExecHandler.created[0].started).toBe(1);
+    expect(ws.envelopes()[0]).toEqual({ type: 'open', data: { kind: 'exec', chan: 1 }, seq: 5 });
+  });
+
+  it('缺 command / 多行 / 超长 → 前置拒绝，不去建连', async () => {
+    const { session } = makeDO();
+    for (const [command, message] of [
+      [undefined, 'open: exec 需要 command'],
+      ['ls\nwhoami', 'open: command 必须是单行且不超过 4096 字符'],
+      ['x'.repeat(4097), 'open: command 必须是单行且不超过 4096 字符'],
+    ] as const) {
+      await session.webSocketMessage(ws, text({ type: 'open', data: { kind: 'exec', node: NODE, command }, seq: 9 }));
+      expect(lastEnvelope()).toEqual({ type: 'error', data: { message }, seq: 9 });
+    }
+    expect(mocks.dialNode).not.toHaveBeenCalled();
+  });
+
+  it('往 exec 通道发数据帧 → 明确报错（它没有 stdin）', async () => {
+    const { session } = makeDO();
+    await open(session, 'exec', 1, { command: 'uptime' });
+    await session.webSocketMessage(ws, encodeFrame(1, new Uint8Array([1, 2])).buffer as ArrayBuffer);
+    expect(lastEnvelope()).toEqual({ type: 'error', data: { chan: 1, message: 'exec 通道不接受输入' } });
+  });
+
+  it('关 exec 通道 → 连接跟着关（不与会话保活混为一谈）', async () => {
+    const { session } = makeDO();
+    await open(session, 'exec', 1, { command: 'uptime' });
+    await session.webSocketMessage(ws, text({ type: 'close', data: { chan: 1 } }));
+    expect(connection.closedChannels).toEqual([1]);
+  });
+});
+
+describe('pty 会话保活', () => {
+  it('WS 断开后用同一个 session_id 重连 → 接回原会话并回放 scrollback', async () => {
+    const { session } = makeDO();
+    await open(session, 'pty', 1, { session_id: 'tab-1', cols: 100, rows: 30 });
+    const output = new TextEncoder().encode('$ echo hi\r\nhi\r\n');
+    FakePTYHandler.created[0].cb.data(output);
+    expect(ws.binaries()).toHaveLength(1);
+
+    await session.webSocketClose(ws);
+    expect(connection.closeCount).toBe(0);
+
+    await reconnect(session);
+    await open(session, 'pty', 2, { session_id: 'tab-1' });
+
+    expect(lastEnvelope()).toEqual({
+      type: 'open',
+      data: { kind: 'pty', chan: 2, reattached: true, chunk_size: 32 * 1024, window: 256 * 1024 },
+      seq: 2,
+    });
+    // 回放排在响应之后：先 open，再历史字节。
+    const sent = ws.sent.map((item) => (typeof item === 'string' ? 'text' : 'bytes'));
+    expect(sent).toEqual(['text', 'bytes']);
+    expect(ws.binaries()[0].subarray(6)).toEqual(output);
+    // 没有重新拨号：接回来的是同一个 shell。
+    expect(mocks.dialNode).toHaveBeenCalledTimes(1);
+  });
+
+  it('session_id 属于另一节点 → 拒绝复用（否则能把别人的 shell 接过来）', async () => {
+    const { session } = makeDO();
+    await open(session, 'pty', 1, { session_id: 'tab-1' });
+    await session.webSocketClose(ws);
+    await reconnect(session);
+    await session.webSocketMessage(ws, text({
+      type: 'open',
+      data: { kind: 'pty', node: { ...NODE, username: 'other' }, session_id: 'tab-1' },
+      seq: 3,
+    }));
+    expect(lastEnvelope()).toEqual({
+      // 通道号接着上一路往下发（2），不是被拒绝的那路复用 1。
+      type: 'error',
+      data: { chan: 2, message: 'session_id 已属于另一节点，会话不能跨节点复用；请新开一个标签' },
+      seq: 3,
+    });
+  });
+
+  it('空闲超时后会话被回收，连接随之关闭', async () => {
+    vi.useFakeTimers();
+    try {
+      const { session } = makeDO();
+      await open(session, 'pty', 1, { session_id: 'tab-1' });
+      await session.webSocketClose(ws);
+      expect(connection.closeCount).toBe(0);
+      vi.advanceTimersByTime(60_000);
+      expect(connection.closeCount).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -1,8 +1,7 @@
 // 建连：把「节点描述」变成一条**已通过公网校验、已挂上主机密钥校验**的 SSH 连接。
 //
-// 三条入口都用它 —— WS 的 open、HTTP 的批量命令、HTTP 的下载。这三处的动作完全一样
-// （校验目标 → 建 TCP → 造连接），差别只在尺寸参数与「连接结束时报给谁」。
-// 规则只写一遍，才不会出现「某个入口漏了 SSRF 校验」这种要命的分叉。
+// 唯一的入口是 WS 的 open：校验目标 → 建 TCP → 造连接。
+// 规则只写一遍，才不会出现「某个路径漏了 SSRF 校验」这种要命的分叉。
 //
 // 这里是**全工程唯一**接触 `cloudflare:sockets` 的地方：
 //   · Worker 出站 TCP 只能连公网，且必须用「校验过的 IP」而不是原始域名（防 DNS 重绑定）。
@@ -64,10 +63,10 @@ export async function openVerifiedSocket(
 }
 
 export interface DialOptions {
-  /** PTY 初始尺寸。exec 与 sftp 不关心，省略即用默认。 */
+  /** PTY 初始尺寸。sftp 不关心，省略即用默认。 */
   cols?: unknown;
   rows?: unknown;
-  /** 连接彻底结束的通知。批量命令/下载不需要额外动作时传空函数即可。 */
+  /** 连接彻底结束的通知；不需要额外动作时传空函数即可。 */
   onEnded: (error: Error) => void;
 }
 

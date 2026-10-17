@@ -4,11 +4,13 @@
 
 import type { ApiNode } from './types'
 
-/** 通道种类：一路终端标签，或一路文件管理标签。 */
-export type Kind = 'pty' | 'sftp'
+/** 通道种类：一路终端、一路非交互命令、或一路文件管理。 */
+export type Kind = 'pty' | 'exec' | 'sftp'
 
 /** 控制面动词。 */
 export type Verb =
+  // 连接建立时服务端主动报身份
+  | 'hello'
   // 通道生命周期
   | 'open'
   | 'close'
@@ -18,6 +20,8 @@ export type Verb =
   | 'pong'
   | 'error'
   | 'ack'
+  // exec 收尾（服务端主动推）
+  | 'exit'
   // SFTP 目录操作
   | 'ls'
   | 'mkdir'
@@ -45,6 +49,38 @@ export interface ErrorData {
 export interface AckData {
   chan: number
   bytes: number
+}
+
+/** 本前端说话的协议版本。服务端 hello 里的 protocol 与之不符时，枢纽拒绝建立任何通道
+ *  ——半懂不懂地跑下去，症状是「某几个功能莫名没反应」，比直接报错难查得多。 */
+export const PROTOCOL_VERSION = 2
+
+/** hello 负载：连接建立时服务端主动报出的身份与硬上限。
+ *  limits 让页面在操作前就能提示（而不是传完 10MB 才发现超了）；
+ *  backend 让排障时一眼看出「我连的到底是 Go 还是 Worker」。 */
+export interface HelloData {
+  protocol: number
+  backend: string
+  limits: HelloLimits
+}
+
+export interface HelloLimits {
+  max_channels: number
+  max_file_bytes: number
+  max_list_entries: number
+  max_remove_depth: number
+  max_exec_output: number
+  pty_idle_ttl_ms: number
+}
+
+/** exit 负载：命令结束了。
+ *  code 为 null 表示服务端没拿到 exit-status（被掐断、或对端未按 RFC 回传），
+ *  与 code=0 是两件事——把「未知」显示成成功会让人以为命令跑对了。 */
+export interface ExitData {
+  chan: number
+  code: number | null
+  truncated_stdout?: boolean
+  truncated_stderr?: boolean
 }
 
 /** open 响应负载。
@@ -77,7 +113,15 @@ export interface OpenSFTP {
   node: ApiNode
 }
 
-export type OpenPayload = OpenPTY | OpenSFTP
+/** exec：跑一条非交互命令。没有 session_id——命令的生死跟着通道走，
+ *  不像 PTY 那样需要在服务端留着 shell 等重连。 */
+export interface OpenExec {
+  kind: 'exec'
+  node: ApiNode
+  command: string
+}
+
+export type OpenPayload = OpenPTY | OpenSFTP | OpenExec
 
 /** 目录/传输类请求负载：通道号由枢纽统一注入，调用方只写业务字段。 */
 export type RequestData = Record<string, unknown>

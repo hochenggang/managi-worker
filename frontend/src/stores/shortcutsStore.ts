@@ -1,6 +1,5 @@
 // Pinia store：统一维护快捷命令。
-// 将原本散落在 CmdsView 中的 localStorage 操作集中到此处，
-// 便于导入/导出配置时一并处理。
+// localStorage 读写集中在这里，设置页的配置导入/导出也跟着它走。
 
 import { defineStore } from 'pinia'
 import { ref } from 'vue'

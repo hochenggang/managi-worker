@@ -291,7 +291,7 @@ function parseAttrs(reader: Reader, maxExtended: number): SFTPAttrs {
   return { flags, size, uid, gid, permissions, atime, mtime, extended };
 }
 
-function parseStatus(reader: Reader, requestId: number): { code: number; description: string; language: string } {
+function parseStatus(reader: Reader): { code: number; description: string; language: string } {
   const code = reader.readUint32('status code');
   const description = reader.readText('status description');
   const language = reader.readText('status language');
@@ -308,6 +308,16 @@ export class SFTPClient {
   private readonly maxVersionExtensions: number;
   private readonly requestTimeoutMs: number;
   private readonly pending = new Map<number, PendingRequest<unknown>>();
+  /**
+   * 最近了结（成功应答或超时）的请求号。
+   *
+   * 服务器完全可能在超时之后才把应答送回来 —— 慢服务器上一次卡顿就够。
+   * 那串字节属于一个已经没有人在等的请求，丢掉即可；以前它会撞上
+   * "unknown request ID" 被当成协议错误，整条 SFTP 通道被 dispose，
+   * 前端看到的是文件管理页报废。用 Set 是因为它保持插入顺序，可当 FIFO 环用。
+   */
+  private readonly retired = new Set<number>();
+  private static readonly RETIRED_LIMIT = 512;
   private state: ClientState = 'new';
   private nextRequestId: number;
   private header = new Uint8Array(4);
@@ -445,6 +455,7 @@ export class SFTPClient {
       request.reject(reason);
     }
     this.pending.clear();
+    this.retired.clear();
   }
 
   realpath(path: string): Promise<string> {
@@ -562,7 +573,10 @@ export class SFTPClient {
 
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
-        if (this.pending.delete(id)) reject(new SFTPTimeoutError(id));
+        if (!this.pending.delete(id)) return;
+        // 记下来：这条请求的应答仍可能晚到，那时候不能再被当成协议错误。
+        this.retire(id);
+        reject(new SFTPTimeoutError(id));
       }, this.requestTimeoutMs);
       const pending: PendingRequest<T> = { id, timer, parse: (responseType, reader) => parse(responseType, reader, id), resolve, reject };
       this.pending.set(id, pending as PendingRequest<unknown>);
@@ -578,7 +592,7 @@ export class SFTPClient {
   private statusRequest(type: number, fields: readonly Uint8Array[]): Promise<void> {
     return this.request(type, fields, (responseType, reader, id) => {
       if (responseType !== SFTP_PACKET_TYPES.STATUS) this.unexpected(responseType, SFTP_PACKET_TYPES.STATUS);
-      const status = parseStatus(reader, id);
+      const status = parseStatus(reader);
       if (status.code !== SFTP_STATUS.OK) {
         throw new SFTPStatusError(status.code, id, status.description, status.language);
       }
@@ -596,9 +610,15 @@ export class SFTPClient {
     const id = reader.readUint32('request ID');
     if (id === 0) throw new SFTPProtocolError('Received an SFTP response with request ID zero');
     const request = this.pending.get(id);
-    if (!request) throw new SFTPProtocolError(`Received an SFTP response with unknown request ID ${id}`);
+    if (!request) {
+      // 迟到的应答（请求已超时）与重复应答：这份数据已经没有人在等。
+      // 丢掉即可 —— 把它当协议错误会连累整条通道，代价远大于收益。
+      if (this.retired.has(id)) return;
+      throw new SFTPProtocolError(`Received an SFTP response with unknown request ID ${id}`);
+    }
     this.pending.delete(id);
     clearTimeout(request.timer);
+    this.retire(id);
 
     try {
       const value = request.parse(type, reader);
@@ -652,7 +672,7 @@ export class SFTPClient {
   }
 
   private parseEofStatus(reader: Reader, id: number): null {
-    const status = parseStatus(reader, id);
+    const status = parseStatus(reader);
     if (status.code === SFTP_STATUS.EOF) return null;
     throw new SFTPStatusError(status.code, id, status.description, status.language);
   }
@@ -660,7 +680,7 @@ export class SFTPClient {
   private throwStatusOrUnexpected(type: number, reader: Reader, id: number, expected: number): void {
     if (type === expected) return;
     if (type !== SFTP_PACKET_TYPES.STATUS) this.unexpected(type, expected);
-    const status = parseStatus(reader, id);
+    const status = parseStatus(reader);
     throw new SFTPStatusError(status.code, id, status.description, status.language);
   }
 
@@ -705,7 +725,17 @@ export class SFTPClient {
     if (!request) return;
     this.pending.delete(id);
     clearTimeout(request.timer);
+    this.retire(id);
     request.reject(reason);
+  }
+
+  /** retire 记下一个已了结的请求号，保留最近若干个（够覆盖任何现实中的晚到）。 */
+  private retire(id: number): void {
+    this.retired.add(id);
+    if (this.retired.size <= SFTPClient.RETIRED_LIMIT) return;
+    // Set 的迭代顺序是插入顺序：删掉最早那一个就是一个环形缓冲。
+    const oldest = this.retired.values().next();
+    if (!oldest.done) this.retired.delete(oldest.value);
   }
 
   private failInitialization(reason: unknown): void {

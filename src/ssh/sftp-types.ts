@@ -60,19 +60,6 @@ export const SFTP_ATTR_FLAGS = {
   EXTENDED: 0x80000000,
 } as const;
 
-// Protocol-style aliases make the constants easy to compare with the v3 draft.
-export const SSH_FXF_READ = SFTP_OPEN_FLAGS.READ;
-export const SSH_FXF_WRITE = SFTP_OPEN_FLAGS.WRITE;
-export const SSH_FXF_APPEND = SFTP_OPEN_FLAGS.APPEND;
-export const SSH_FXF_CREAT = SFTP_OPEN_FLAGS.CREATE;
-export const SSH_FXF_TRUNC = SFTP_OPEN_FLAGS.TRUNCATE;
-export const SSH_FXF_EXCL = SFTP_OPEN_FLAGS.EXCLUSIVE;
-export const SSH_FILEXFER_ATTR_SIZE = SFTP_ATTR_FLAGS.SIZE;
-export const SSH_FILEXFER_ATTR_UIDGID = SFTP_ATTR_FLAGS.UID_GID;
-export const SSH_FILEXFER_ATTR_PERMISSIONS = SFTP_ATTR_FLAGS.PERMISSIONS;
-export const SSH_FILEXFER_ATTR_ACMODTIME = SFTP_ATTR_FLAGS.ACCESS_MODIFY_TIME;
-export const SSH_FILEXFER_ATTR_EXTENDED = SFTP_ATTR_FLAGS.EXTENDED;
-
 export type SFTPOpenFlags = number;
 export type SFTPHandle = Uint8Array;
 export type SFTPUint64Input = number | bigint | string;
@@ -192,6 +179,3 @@ export function formatSFTPPermissions(value: SFTPAttrs | number | undefined): st
   if (permissions & 0o1000) bits[8] = permissions & 0o001 ? 't' : 'T';
   return prefix[getSFTPFileKind(permissions)] + bits.join('');
 }
-
-export const getFileKind = getSFTPFileKind;
-export const formatPermissions = formatSFTPPermissions;

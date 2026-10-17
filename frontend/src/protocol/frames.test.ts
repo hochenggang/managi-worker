@@ -20,7 +20,12 @@ describe('encodeFrame', () => {
   it('encodes an empty end frame (upload 落定信号)', () => {
     const f = encodeFrame(3, new Uint8Array(0), true)
     expect(f).toHaveLength(HEADER_LEN)
-    expect(decodeFrame(f.buffer)).toEqual({ chan: 3, end: true, payload: new Uint8Array(0) })
+    expect(decodeFrame(f.buffer)).toEqual({
+      chan: 3,
+      end: true,
+      stderr: false,
+      payload: new Uint8Array(0),
+    })
   })
 })
 

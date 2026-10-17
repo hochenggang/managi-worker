@@ -1,5 +1,4 @@
-// 节点描述的校验与转换：WS 的 open 与 HTTP 的两条入口共用同一套规则，
-// 免得几条入口对「什么算合法节点」各执一词。
+// 节点描述的校验与转换：WS 的 open 是唯一入口，规则集中在这里。
 
 import type { ApiNode } from './protocol';
 import type { SSHConnectionConfig } from './types';
@@ -55,7 +54,3 @@ export function buildNodeConfig(node: ApiNode, cols: unknown, rows: unknown): SS
   };
 }
 
-/** maskNode 脱敏后的节点副本：返回给前端的执行结果里不该带凭据。 */
-export function maskNode(node: ApiNode): ApiNode {
-  return { ...node, auth_value: '***' };
-}

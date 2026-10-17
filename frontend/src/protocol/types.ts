@@ -23,22 +23,6 @@ export interface OldApiNode {
   auth_value: string
 }
 
-/** 单节点命令执行结果。 */
-export interface CmdsTestResult {
-  time_elapsed: number
-  success: boolean
-  output: string[]
-  error: string[]
-  node: ApiNode
-  cmds: string
-}
-
-/** 批量命令请求体。 */
-export interface BatchCmdRequest {
-  nodes: ApiNode[]
-  cmds: string[]
-}
-
 /** 快捷命令项。 */
 export interface ShortcutItem {
   label: string

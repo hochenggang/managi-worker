@@ -187,6 +187,13 @@ function closeAll(): void {
   transform: scale(1.1);
 }
 
+.tab-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0 0.5rem;
+}
+
 .tab-add {
   display: flex;
   align-items: center;
@@ -209,13 +216,6 @@ function closeAll(): void {
 .tab-add:hover {
   background-color: var(--color-hover-bg);
   color: var(--color-accent);
-}
-
-.tab-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.25rem;
-  padding: 0 0.5rem;
 }
 
 .context-menu {

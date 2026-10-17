@@ -135,7 +135,7 @@
 import { ref, computed, nextTick, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import CirclePercent from '@/components/CirclePercent.vue'
-import { useSFTP, LARGE_FILE_THRESHOLD } from '@/composables/useSFTP'
+import { useSFTP } from '@/composables/useSFTP'
 import { useConfirm } from '@/composables/useConfirm'
 import { handleError, handleMsg, toErrorMessage } from '@/helper'
 import type { ApiNode } from '@/protocol/types'
@@ -147,7 +147,7 @@ const { t } = useI18n()
 
 const {
   currentPath, files, loading, uploadProgress, downloadProgress,
-  status, list, upload, download, downloadViaHTTP, mkdir, del, close,
+  status, list, upload, download, mkdir, del, close,
 } = useSFTP(props.node)
 
 const selectedFile = ref<SFTPFile | null>(null)
@@ -308,12 +308,8 @@ const downloadSelected = async () => {
   isDownloading.value = true
   const path = getFullPath(selectedFile.value.filename)
   try {
-    // 大文件走 HTTP Range 流式下载，避免 WS 缓冲超限
-    if (selectedFile.value.size > LARGE_FILE_THRESHOLD) {
-      await downloadViaHTTP(path)
-    } else {
-      await download(path)
-    }
+    // 把列表里已知的大小带上：超上限时直接说清楚，不必白开一次连接
+    await download(path, selectedFile.value.size)
     handleMsg(t('finder.downloaded'))
   } catch (e) {
     handleError(String(e))

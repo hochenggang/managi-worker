@@ -4,7 +4,8 @@
 
 import { ref, type Ref } from 'vue'
 import type { Channel, ChannelSpec, ChannelState, ConnectionStatus, Hub } from '@/composables/useWSHub'
-import type { Kind, OpenResponse, RequestData, Verb } from '@/protocol/ws'
+import type { HelloData, Kind, OpenResponse, RequestData, Verb } from '@/protocol/ws'
+import { PROTOCOL_VERSION } from '@/protocol/ws'
 
 export interface FakeRequest {
   type: Verb
@@ -36,8 +37,8 @@ export interface FakeChannel {
   lost: () => void
   /** 通道打开失败 */
   fail: () => void
-  /** 服务端推一帧数据 */
-  push: (payload: Uint8Array, end?: boolean) => void
+  /** 服务端推一帧数据；stderr=true 模拟 exec 通道的标准错误流。 */
+  push: (payload: Uint8Array, end?: boolean, stderr?: boolean) => void
   /** 服务端主动推控制帧（seq=0） */
   emit: (type: Verb, data?: unknown) => void
   /** 最近一次请求；不存在则报错，避免断言静默落在 undefined 上 */
@@ -53,6 +54,19 @@ export interface FakeHub extends Hub {
 
 export function createFakeHub(link: ConnectionStatus = 'connected'): FakeHub {
   const status = ref<ConnectionStatus>(link)
+  // 默认给一份与服务端同值的手册：被测代码要按上限算并发，缺了它只能走兜底分支
+  const hello = ref<HelloData | null>({
+    protocol: PROTOCOL_VERSION,
+    backend: 'fake',
+    limits: {
+      max_channels: 16,
+      max_file_bytes: 10 << 20,
+      max_list_entries: 10_000,
+      max_remove_depth: 64,
+      max_exec_output: 4 << 20,
+      pty_idle_ttl_ms: 60_000,
+    },
+  })
   const channels: FakeChannel[] = []
   let chanSeq = 0
 
@@ -104,7 +118,7 @@ export function createFakeHub(link: ConnectionStatus = 'connected'): FakeHub {
         state.value = 'error'
         flushAcks()
       },
-      push: (payload, end = false) => spec.onData(payload, end),
+      push: (payload, end = false, stderr = false) => spec.onData(payload, end, stderr),
       emit: (type, data) => {
         spec.onNotify(type, data)
         // 与真实枢纽一致：通道级错误随后放行等窗口的挂起者
@@ -163,6 +177,7 @@ export function createFakeHub(link: ConnectionStatus = 'connected'): FakeHub {
 
   return {
     status,
+    hello,
     channels,
     attach,
     dispose: () => {},

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HttpError, clampInt, deferred, messageOf, splitLines, toError, withTimeout } from '../src/util';
+import { clampInt, deferred, messageOf, toError, withTimeout } from '../src/util';
 
 describe('messageOf', () => {
   it('取 Error 的 message', () => {
@@ -35,16 +35,6 @@ describe('toError', () => {
 
   it('undefined 也能包出来', () => {
     expect(toError(undefined).message).toBe('undefined');
-  });
-});
-
-describe('HttpError', () => {
-  it('带状态码且是 Error', () => {
-    const error = new HttpError(413, '请求体过大');
-    expect(error).toBeInstanceOf(Error);
-    expect(error.status).toBe(413);
-    expect(error.message).toBe('请求体过大');
-    expect(error.name).toBe('HttpError');
   });
 });
 
@@ -128,37 +118,5 @@ describe('withTimeout', () => {
   it('底层先失败时透传原始错误，不换成超时文案', async () => {
     await expect(withTimeout(Promise.reject(new Error('底层炸了')), 1000, '不该超时'))
       .rejects.toThrow('底层炸了');
-  });
-});
-
-describe('splitLines', () => {
-  it('空串没有行', () => {
-    expect(splitLines('')).toEqual([]);
-  });
-
-  it('按 \\n 拆分', () => {
-    expect(splitLines('a\nb')).toEqual(['a', 'b']);
-  });
-
-  it('末尾换行不产生空尾行', () => {
-    expect(splitLines('a\nb\n')).toEqual(['a', 'b']);
-    expect(splitLines('a\n\n\n')).toEqual(['a']);
-  });
-
-  it('去掉行尾 \\r（远端可能是 Windows，或命令自己输出 CRLF）', () => {
-    expect(splitLines('a\r\nb\r\n')).toEqual(['a', 'b']);
-  });
-
-  it('保留中间的空行（命令输出的分节靠它）', () => {
-    expect(splitLines('a\n\nb')).toEqual(['a', '', 'b']);
-  });
-
-  it('只有换行时没有任何行', () => {
-    expect(splitLines('\n')).toEqual([]);
-    expect(splitLines('\n\n')).toEqual([]);
-  });
-
-  it('单行无换行', () => {
-    expect(splitLines('只有一行')).toEqual(['只有一行']);
   });
 });

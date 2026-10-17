@@ -26,7 +26,7 @@ describe('tabsStore 节点标签判重', () => {
     const store = useTabsStore()
     const node = makeNode('a', '1.1.1.1', 22)
     const first = store.openTerminal(node)
-    store.openBatch()
+    store.openSettings()
     const again = store.openTerminal(makeNode('a', '1.1.1.1', 22))
     expect(again.id).toBe(first.id)
     expect(store.tabs.filter((t) => t.type === 'terminal')).toHaveLength(1)
@@ -52,11 +52,9 @@ describe('tabsStore 节点标签判重', () => {
     expect(store.tabs.map((t) => t.type)).toEqual(['terminal', 'sftp'])
   })
 
-  it('openBatch / openSettings: 单例标签只保留一个', () => {
+  it('openSettings: 单例标签只保留一个', () => {
     const store = useTabsStore()
-    expect(store.openBatch().id).toBe(store.openBatch().id)
     expect(store.openSettings().id).toBe(store.openSettings().id)
-    expect(store.tabs.filter((t) => t.type === 'batch')).toHaveLength(1)
     expect(store.tabs.filter((t) => t.type === 'settings')).toHaveLength(1)
   })
 })

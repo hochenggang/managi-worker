@@ -15,9 +15,11 @@ import { decodeFrame, encodeFrame } from '@/protocol/frames'
 import {
   decodeEnvelope,
   encodeEnvelope,
+  PROTOCOL_VERSION,
   type AckData,
   type Envelope,
   type ErrorData,
+  type HelloData,
   type OpenPayload,
   type OpenResponse,
   type RequestData,
@@ -36,9 +38,10 @@ export interface ChannelSpec {
   openData: () => OpenPayload
   /** 通道就绪：首次打开与每次重连后各一次，resp.chan 是这条新连接上的通道号。 */
   onOpen: (resp: OpenResponse) => void
-  /** 本通道的数据帧到达。end=true 表示这路流结束（载荷可为空）。 */
-  onData: (payload: Uint8Array, end: boolean) => void
-  /** 服务端主动推的控制帧（seq=0）：error / upload_end。 */
+  /** 本通道的数据帧到达。end=true 表示这路流结束（载荷可为空）；
+   *  stderr=true 表示这一片来自标准错误（只有 exec 通道会出现）。 */
+  onData: (payload: Uint8Array, end: boolean, stderr: boolean) => void
+  /** 服务端主动推的控制帧（seq=0）：error / upload_end / exit。 */
   onNotify: (type: Verb, data: unknown) => void
 }
 
@@ -61,6 +64,8 @@ export interface Channel {
 
 export interface Hub {
   readonly status: Ref<ConnectionStatus>
+  /** 服务端连上即报的身份与上限；未收到时为 null（缺 hello 的老服务端仍可用 pty/sftp）。 */
+  readonly hello: Ref<HelloData | null>
   attach: (spec: ChannelSpec) => Channel
   /** 释放连接与全部定时器（单测与页面卸载用）。 */
   dispose: () => void
@@ -78,9 +83,45 @@ const MAX_RECONNECT = 10
 // 只影响发送节流精度，不影响正确性——服务端队列预算独立于它。
 const FALLBACK_INPUT_WINDOW = 8 << 20
 
+/** 客户端身份：决定服务端把这条连接落到哪个会话实例上。
+ *
+ *  没有它，同一次页面里的每次重连都可能落到新实例，后端留着的 shell 就再也接不回来
+ *  ——「断线重连」看起来能用，实际上每次都开新 shell、旧会话按 TTL 悄悄过期。
+ *  存 sessionStorage（而非 localStorage）是刻意的：一个浏览器标签 = 一个客户端。
+ *  用 localStorage 的话，同一台机器的两个标签会抢同一个后端会话，互相看到对方的终端。
+ */
+const CLIENT_ID_KEY = 'managi-client-id'
+const CLIENT_ID_RE = /^[A-Za-z0-9_-]{16,64}$/
+
+function newClientId(): string {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** clientId 取（或首次生成）本标签页的稳定身份。
+ *  隐私模式下 sessionStorage 会抛异常：退化为「仅本次页面生命周期有效」，
+ *  这时 F5 之后接不回原来的 shell，但功能本身不能因此坏掉。 */
+export function clientId(): string {
+  try {
+    const saved = sessionStorage.getItem(CLIENT_ID_KEY)
+    if (saved && CLIENT_ID_RE.test(saved)) return saved
+  } catch {
+    // 存储不可用：走下面的临时身份
+  }
+  const id = newClientId()
+  try {
+    sessionStorage.setItem(CLIENT_ID_KEY, id)
+  } catch {
+    // 同上：存不下就只在本次页面里用
+  }
+  return id
+}
+
 function hubUrl(): string {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  return `${proto}://${getApiBase().replace(/^https?:\/\//, '')}/ws`
+  const base = `${proto}://${getApiBase().replace(/^https?:\/\//, '')}/ws`
+  return `${base}?client=${encodeURIComponent(clientId())}`
 }
 
 interface Binding {
@@ -117,6 +158,7 @@ interface Pending {
  */
 export function createHub(url = hubUrl()): Hub {
   const status = ref<ConnectionStatus>('idle')
+  const hello = ref<HelloData | null>(null)
   const bindings = new Set<Binding>()
   const byChan = new Map<number, Binding>()
   const pending = new Map<number, Pending>()
@@ -312,9 +354,58 @@ export function createHub(url = hubUrl()): Hub {
     const env = decodeEnvelope(text)
     if (!env) return
     if (env.type === 'pong') return // 心跳应答：入站本身已用于续命，无需再分发
+    if (env.type === 'hello') {
+      handleHello(env.data)
+      return
+    }
     const seq = env.seq ?? 0
     if (seq > 0) settle(seq, env)
     else routeNotification(env)
+  }
+
+  /** handleHello 校验服务端「是不是我认得的这一版」。
+   *
+   *  版本不符时必须立刻停手并说清楚：继续跑下去的症状是「个别功能没反应」
+   *  ——比如拿着 v2 的 lib 去开 exec 通道，服务端不认这个 kind，前端只看到
+   *  一个永远等不到响应的 open。这种故障靠猜查不出来，只能靠一个明确的号拒绝。
+   */
+  function handleHello(data: unknown): void {
+    const h = data as HelloData | undefined
+    if (!h || typeof h.protocol !== 'number') return
+    hello.value = h
+    if (h.protocol === PROTOCOL_VERSION) return
+
+    const reason =
+      `前后端协议版本不一致：页面需要 v${PROTOCOL_VERSION}，服务端报的是 v${h.protocol}（${h.backend}）。` +
+      '通常是后端升级后浏览器还在跑旧缓存，刷新页面即可；仍不行说明部署时前后端版本没有一起更新。'
+    console.error('[useWSHub]', reason)
+
+    // 版本不符重连一万次也一样：停掉重连，把原因一次性说清
+    stopped = true
+    stopHeartbeat()
+    clearWatchdog()
+    const conn = ws
+    ws = null
+    if (conn) {
+      conn.onopen = null
+      conn.onmessage = null
+      conn.onclose = null
+      conn.onerror = null
+      conn.close()
+    }
+    byChan.clear()
+    for (const b of bindings) {
+      const inFlight = b.pending.size > 0
+      b.chan = 0
+      b.pending.clear()
+      releaseAckWaiters(b)
+      b.state.value = 'error'
+      // 在途的 open 会从 reopen 的 catch 里拿到同一个原因，这里再报一次会弹两个提示
+      if (!inFlight) b.spec.onNotify('error', { message: reason })
+    }
+    // 放在循环之后：failPending 会清掉 b.pending，先调用就分不出「在途」与「已就绪」
+    failPending(new Error(reason))
+    status.value = 'failed'
   }
 
   /** settle 用响应帧了结等待中的请求。seq 不在表里 = 超时或断线之后才迟到的响应，丢弃。 */
@@ -413,7 +504,7 @@ export function createHub(url = hubUrl()): Hub {
       dropAndReconnect('收到畸形数据帧，重连恢复')
       return
     }
-    byChan.get(f.chan)?.spec.onData(f.payload, f.end)
+    byChan.get(f.chan)?.spec.onData(f.payload, f.end, f.stderr)
   }
 
   // ===== 通道 =====
@@ -509,7 +600,7 @@ export function createHub(url = hubUrl()): Hub {
     status.value = 'idle'
   }
 
-  return { status, attach, dispose }
+  return { status, hello, attach, dispose }
 }
 
 // 整页一个枢纽：一条 /ws 连接承载全部终端与文件管理标签。

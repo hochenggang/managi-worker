@@ -19,18 +19,16 @@ const { width } = useSidebar()
 const tabsStore = useTabsStore()
 const settingsStore = useSettingsStore()
 
-function resolveComponent(type: string) {
+function resolveComponent(type: TabItem['type']) {
   switch (type) {
-    case 'batch':
-      return CmdsView
     case 'terminal':
       return TerminalTab
     case 'sftp':
       return SftpTab
-    case 'settings':
-      return SettingsView
-    default:
+    case 'batch':
       return CmdsView
+    default:
+      return SettingsView
   }
 }
 
@@ -38,9 +36,6 @@ onBeforeMount(() => {
   settingsStore.setTheme(settingsStore.settings.theme)
   i18n.global.locale.value = settingsStore.settings.language
   localStorage.setItem('lang', settingsStore.settings.language)
-  if (tabsStore.tabs.length === 0) {
-    tabsStore.openBatch()
-  }
 })
 </script>
 

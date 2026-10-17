@@ -289,8 +289,8 @@ describe('createHub：数据面路由', () => {
     expect(channel.frame(new Uint8Array([1, 2]), false)).toBe(true)
     expect(channel.frame(new Uint8Array(0), true)).toBe(true)
     expect(sock.frames()).toEqual([
-      { chan: 7, end: false, payload: new Uint8Array([1, 2]) },
-      { chan: 7, end: true, payload: new Uint8Array(0) },
+      { chan: 7, end: false, stderr: false, payload: new Uint8Array([1, 2]) },
+      { chan: 7, end: true, stderr: false, payload: new Uint8Array(0) },
     ])
   })
 
@@ -308,7 +308,7 @@ describe('createHub：数据面路由', () => {
 
     lastSocket().push(encodeFrame(2, new Uint8Array([9, 9])))
     expect(a.onData).not.toHaveBeenCalled()
-    expect(b.onData).toHaveBeenCalledWith(new Uint8Array([9, 9]), false)
+    expect(b.onData).toHaveBeenCalledWith(new Uint8Array([9, 9]), false, false)
 
     // 无主通道号（本连接上没这路通道）丢弃即可，不得抛错
     lastSocket().push(encodeFrame(42, new Uint8Array([1])))
@@ -492,5 +492,92 @@ describe('uiStatus：链路态 + 通道态折叠为界面五态', () => {
     expect(uiStatus('connected', 'opening')).toBe('connecting')
     expect(uiStatus('connected', 'error')).toBe('failed')
     expect(uiStatus('connected', 'open')).toBe('connected')
+  })
+})
+
+describe('createHub：hello 握手', () => {
+  const helloOf = (over: Record<string, unknown> = {}) => ({
+    type: 'hello',
+    data: {
+      protocol: 2,
+      backend: 'go',
+      limits: {
+        max_channels: 16,
+        max_file_bytes: 10485760,
+        max_list_entries: 10000,
+        max_remove_depth: 64,
+        max_exec_output: 4194304,
+        pty_idle_ttl_ms: 60000,
+      },
+      ...over,
+    },
+  })
+
+  it('收到 hello 记下后端身份与上限，通道照常打开', async () => {
+    const rec = makeSpec()
+    const channel = hub.attach(rec.spec)
+    const sock = lastSocket()
+    sock.accept()
+    sock.reply(helloOf())
+
+    expect(hub.hello.value?.backend).toBe('go')
+    expect(hub.hello.value?.limits.max_channels).toBe(16)
+    expect(hub.hello.value?.limits.max_exec_output).toBe(4194304)
+
+    openReply(sock, 1)
+    await tick()
+    expect(channel.state.value).toBe('open')
+  })
+
+  it('协议版本不符：立刻停手、明确报错、不重连', async () => {
+    const rec = makeSpec()
+    const channel = hub.attach(rec.spec)
+    const sock = lastSocket()
+    sock.accept()
+    sock.reply(helloOf({ protocol: 1 }))
+    await tick()
+
+    expect(hub.status.value).toBe('failed')
+    expect(channel.state.value).toBe('error')
+    expect(rec.onNotify).toHaveBeenCalledWith(
+      'error',
+      expect.objectContaining({ message: expect.stringContaining('协议版本') }),
+    )
+    expect(sock.readyState).toBe(FakeSocket.CLOSED)
+
+    // 版本不符重连一万次也一样：推进定时器不该再建新连接
+    vi.advanceTimersByTime(60_000)
+    expect(FakeSocket.created).toHaveLength(1)
+  })
+
+  it('老服务端没有 hello：不当异常，pty/sftp 照旧（只是拿不到上限）', async () => {
+    const rec = makeSpec()
+    const channel = hub.attach(rec.spec)
+    const sock = lastSocket()
+    sock.accept()
+    openReply(sock, 1)
+    await tick()
+
+    expect(hub.hello.value).toBeNull()
+    expect(hub.status.value).toBe('connected')
+    expect(channel.state.value).toBe('open')
+  })
+})
+
+describe('clientId：同一标签页内稳定，且合服务端校验格式', () => {
+  it('两次取到同一个值，长度落在 16..64 的合法区间', async () => {
+    const { clientId } = await import('@/composables/useWSHub')
+    sessionStorage.clear()
+    const first = clientId()
+    expect(clientId()).toBe(first)
+    expect(first).toMatch(/^[A-Za-z0-9_-]{16,64}$/)
+  })
+
+  it('存储里的脏值不被沿用（被改坏就换一个新的）', async () => {
+    const { clientId } = await import('@/composables/useWSHub')
+    sessionStorage.setItem('managi-client-id', 'bad id!')
+    const id = clientId()
+    expect(id).not.toBe('bad id!')
+    expect(id).toMatch(/^[A-Za-z0-9_-]{16,64}$/)
   })
 })

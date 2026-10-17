@@ -7,9 +7,16 @@ export const HEADER_LEN = 6
 /** FLAG_END 该通道上这路数据流到此结束（下载的最后一片、上传的「写完请落定」）。载荷可为空。 */
 export const FLAG_END = 0x0001
 
+/** FLAG_STDERR 这一片是 stderr，不是 stdout。
+ *  只出现在 exec 通道：PTY 把两者合成一路（终端本来就该这样），
+ *  而批量命令必须能分开——「编译报错」混进「正常输出」就等于没报错。 */
+export const FLAG_STDERR = 0x0002
+
 export interface DataFrame {
   chan: number
   end: boolean
+  /** 本片属于 stderr。为 false 时可能是 stdout，也可能是上传/下载的字节流。 */
+  stderr: boolean
   /** payload 是接收缓冲的视图，不拷贝。 */
   payload: Uint8Array
 }
@@ -18,19 +25,28 @@ export interface DataFrame {
 export function decodeFrame(buf: ArrayBuffer): DataFrame | null {
   if (buf.byteLength < HEADER_LEN) return null
   const view = new DataView(buf)
+  const flags = view.getUint16(4)
   return {
     chan: view.getUint32(0),
-    end: (view.getUint16(4) & FLAG_END) !== 0,
+    end: (flags & FLAG_END) !== 0,
+    stderr: (flags & FLAG_STDERR) !== 0,
     payload: new Uint8Array(buf, HEADER_LEN),
   }
 }
 
-/** encodeFrame 组装一帧，返回可直接 ws.send() 的字节。 */
-export function encodeFrame(chan: number, payload: Uint8Array, end = false): Uint8Array {
+/** encodeFrame 组装一帧，返回可直接 ws.send() 的字节。
+ *  stderr 仅服务端→客户端使用；客户端→服务端的方向永远不带它（exec 没有 stdin）。
+ */
+export function encodeFrame(
+  chan: number,
+  payload: Uint8Array,
+  end = false,
+  stderr = false,
+): Uint8Array {
   const out = new Uint8Array(HEADER_LEN + payload.byteLength)
   const view = new DataView(out.buffer)
   view.setUint32(0, chan)
-  view.setUint16(4, end ? FLAG_END : 0)
+  view.setUint16(4, (end ? FLAG_END : 0) | (stderr ? FLAG_STDERR : 0))
   out.set(payload, HEADER_LEN)
   return out
 }

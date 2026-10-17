@@ -58,7 +58,7 @@ import { SSHChannel, type ChannelDataChunk } from './ssh/channel';
 import { encodeString, readUint32, toBufferSource, writeUint32 } from './ssh/utils';
 import { messageOf, toError } from './util';
 import { elapsedMs, logError, logInfo, logWarn } from './log';
-import type { ExecHandler, PTYHandler, SFTPHandler } from './handlers';
+import type { PTYHandler, SFTPHandler } from './handlers';
 
 type Cipher = SSHAESGCMCipher | SSHAESCTRCipher;
 
@@ -72,7 +72,7 @@ export class SSHAuthDefectError extends Error {
 
 /**
  * describeConnectFailure 给一次建连/握手失败配上「哪个节点、为什么」，直接给用户看。
- * 三个调用方（WS open / 批量命令 / 下载）共用，文案才不会一处一个样。
+ * 建连与握手失败都从这里出文案，用户看到的说法才不会一处一个样。
  */
 export function describeConnectFailure(error: unknown, host: string, port: number): string {
   const message = messageOf(error);
@@ -118,9 +118,10 @@ export function negotiateMac(
 
 /** 一路通道对外的三个出口 + 两个生命周期通知。 */
 export interface ChannelCallbacks {
-  /** 通道上的字节，要发给浏览器。end=true 表示这路流到此结束。 */
-  data(payload: Uint8Array, end?: boolean): void;
-  /** 服务端主动推的控制帧（目前只有 ack）。 */
+  /** 通道上的字节，要发给浏览器。end=true 表示这路流到此结束。
+   *  stderr=true 表示这一片来自标准错误（exec 通道），前端据此分栏。 */
+  data(payload: Uint8Array, end?: boolean, stderr?: boolean): void;
+  /** 服务端主动推的控制帧（目前只有 ack / exit）。 */
   control(envelope: { type: string; data?: unknown }): void;
   /** 通道级错误。 */
   error(message: string): void;
@@ -148,8 +149,9 @@ export interface ChannelHandler {
   onEof(): void;
   onClose(): void;
   onWindowAdjust(): void;
-  onExitStatus(status: number): void;
   onOpenFailure(message: string): void;
+  /** 服务端报的进程退出码（exit-status 通道请求）。只有 exec 通道会关心。 */
+  onExitStatus?(code: number): void;
 }
 
 const LOCAL_WINDOW_THRESHOLD = 512 * 1024;
@@ -203,6 +205,8 @@ export class SSHConnection {
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
   private keepalivePending = 0;
   private ignoreNextKexPacket = false;
+  /** 正在做服务端发起的一次重协商：此时 phase 仍是 ready，但报文要按 kex 处理。 */
+  private rekeying = false;
 
   private resolveReady: (() => void) | null = null;
   private rejectReady: ((error: Error) => void) | null = null;
@@ -267,7 +271,8 @@ export class SSHConnection {
     return this.openChannel(handler);
   }
 
-  openExec(handler: ExecHandler): number {
+  /** openExec 开一路非交互命令通道（批量执行）。 */
+  openExec(handler: ChannelHandler): number {
     this.assertReady();
     return this.openChannel(handler);
   }
@@ -409,10 +414,13 @@ export class SSHConnection {
       this.keepalivePending = 0;
       return;
     }
-    if (type === SSH_MSG_KEXINIT && this.phase !== 'kex') {
-      throw new Error('不支持服务器主动发起的 SSH 重新协商密钥');
+    if (type === SSH_MSG_KEXINIT && this.phase !== 'kex' && !this.rekeying && this.phase !== 'ready') {
+      throw new Error('连接尚未就绪就收到了密钥协商');
     }
-    if (this.phase === 'kex') { await this.handleKex(type, packet.payload); return; }
+    if (this.phase === 'kex' || this.rekeying) { await this.handleKex(type, packet.payload); return; }
+    // 已就绪之后收到 KEXINIT = 服务端发起的重协商。OpenSSH 默认在 1GB 流量或 1 小时后
+    // 触发；以前这里直接抛错，长会话会毫无征兆地被掐断（且没有任何可读的原因）。
+    if (type === SSH_MSG_KEXINIT) { await this.beginRekey(packet.payload); return; }
     if (this.phase === 'auth') { await this.handleAuth(type, packet.payload); return; }
     if (this.phase === 'ready') { await this.handleChannel(type, packet.payload); }
   }
@@ -448,25 +456,57 @@ export class SSHConnection {
     if (type === SSH_MSG_NEWKEYS) {
       if (!this.keys || !this.encryptor) throw new Error('NEWKEYS 早于密钥协商完成');
       await this.enableInboundEncryption();
+      if (this.rekeying) {
+        // 重协商完成：会话身份（session_id）、序号、通道全部照旧，只是换了一套密钥。
+        this.rekeying = false;
+        logInfo('ssh.rekey.ok', { host: this.config.host, port: this.config.port });
+        return;
+      }
       this.phase = 'auth';
       await this.sendEncrypted(new Uint8Array([SSH_MSG_SERVICE_REQUEST, ...encodeString('ssh-userauth')]));
     }
+  }
+
+  /**
+   * beginRekey 处理服务端发起的重协商。
+   *
+   * 顺序有讲究：先回自己的 KEXINIT（用旧密钥加密），再按对端那份做协商。
+   * RFC 4253 §9 允许双方各自发起，但只有对端先发了我们才响应，
+   * 避免两端同时发起时多出一次无谓的协商。
+   */
+  private async beginRekey(remotePayload: Uint8Array): Promise<void> {
+    this.rekeying = true;
+    logInfo('ssh.rekey', { host: this.config.host, port: this.config.port });
+    this.localKex = KEXInitBuilder.build();
+    await this.sendKexPayload(this.localKex);
+    await this.handleKex(SSH_MSG_KEXINIT, remotePayload);
   }
 
   private async sendKexInit(): Promise<void> {
     if (this.kexName && isCurve25519KEXAlgorithm(this.kexName)) {
       this.curvePair = await Curve25519KeyExchange.generateKeyPair();
       this.clientPublic = await Curve25519KeyExchange.exportRawPublicKey(this.curvePair);
-      await this.sendPlain(Curve25519KeyExchange.buildInit(this.clientPublic));
+      await this.sendKexPayload(Curve25519KeyExchange.buildInit(this.clientPublic));
       return;
     }
     if (this.kexName === KEX_ALGORITHM_ECDH_NISTP256) {
       this.ecdhPair = await ECDHKeyExchange.generateKeyPair();
       this.clientPublic = await ECDHKeyExchange.exportRawPublicKey(this.ecdhPair);
-      await this.sendPlain(ECDHKeyExchange.buildInit(this.clientPublic));
+      await this.sendKexPayload(ECDHKeyExchange.buildInit(this.clientPublic));
       return;
     }
     throw new Error(`不支持的密钥交换算法：${this.kexName ?? 'none'}`);
+  }
+
+  /**
+   * sendKexPayload 发一个密钥协商报文。
+   *
+   * 首次协商时还没有密钥 → 明文；重协商时旧密钥仍然有效 → 必须用旧密钥加密。
+   * NEWKEYS 本身也用旧密钥发出，之后才切换到新密钥（RFC 4253 §7.3）。
+   */
+  private async sendKexPayload(payload: Uint8Array): Promise<void> {
+    if (this.encryptor) await this.sendEncrypted(payload);
+    else await this.sendPlain(payload);
   }
 
   private async handleEcdhReply(payload: Uint8Array): Promise<void> {
@@ -517,7 +557,7 @@ export class SSHConnection {
       getMacSpec(this.macC2S).keyLength, getMacSpec(this.macS2C).keyLength,
       c2s.keyLength, s2c.keyLength,
     );
-    await this.sendPlain(new Uint8Array([SSH_MSG_NEWKEYS]));
+    await this.sendKexPayload(new Uint8Array([SSH_MSG_NEWKEYS]));
     await this.enableOutboundEncryption();
   }
 
@@ -724,20 +764,26 @@ export class SSHConnection {
       // 这里**不能 await**：SFTP 的 onRequestResult 要等 SFTP INIT/VERSION 往返，
       // 而 VERSION 那批字节正是由这个报文循环自己消费的 —— await 等于让循环等自己，
       // 表现为「SFTP request 0 timed out」（30s 后超时，看起来像网络问题）。
-      // PTY / exec 的 onRequestResult 只发下一个请求、不等往返，本来就不会自锁；
-      // 改成统一不阻塞后它们的行为不变（sendEncrypted 内部已按序串行）。
+      // PTY 的 onRequestResult 只发下一个请求、不等往返，本来就不会自锁；
+      // 改成统一不阻塞后它的行为不变（sendEncrypted 内部已按序串行）。
       // 失败由各 handler 自己报给通道，这里只兜住回调本身抛出的意外。
       void Promise.resolve(handler.onRequestResult(type === SSH_MSG_CHANNEL_SUCCESS))
         .catch((error) => handler.onOpenFailure(messageOf(error)));
       return;
     }
     if (type === SSH_MSG_CHANNEL_REQUEST) {
-      // 服务端发来的通道请求：只认 exec 的 exit-status，其余按「不支持」回失败。
       const name = this.readString(payload, 5);
       const wantReply = payload[name.next];
-      if (name.value === 'exit-status' && name.next + 5 <= payload.length) {
-        handler.onExitStatus(readUint32(payload, name.next + 1));
+      // exit-status：exec 通道的退出码，是「命令跑了但失败」与「通道坏了」的分界。
+      // 它不带 want_reply，回任何东西都是错的。
+      if (name.value === 'exit-status') {
+        if (name.next + 5 > payload.length) throw new Error('exit-status 报文格式错误');
+        handler.onExitStatus?.(readUint32(payload, name.next + 1));
+        return;
       }
+      // exit-signal：只有信号名，前端能用的信息已被 exit-status 覆盖（通常还伴随 128+n）。
+      if (name.value === 'exit-signal') return;
+      // 其余服务端发来的通道请求（PTY 窗口变化之类）本客户端一个都不支持，按规范回失败。
       if (wantReply === 1 && channel.isOpen()) {
         const failure = new Uint8Array(5);
         failure[0] = SSH_MSG_CHANNEL_FAILURE;
@@ -986,4 +1032,3 @@ export class SSHConnection {
 // 处理器从这里转出：调用方（worker / DO / 测试）一直是从 session 拿它们，
 // 拆分不该让外部跟着改 import。
 export { ExecHandler, PTYHandler, SFTPHandler } from './handlers';
-export type { ExecResult } from './handlers';

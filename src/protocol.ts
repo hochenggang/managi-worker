@@ -5,10 +5,16 @@
 //
 // 前端一行都没改，所以这里的动词、字段名、帧头布局都不能自作主张。
 
-/** 通道种类：一路终端标签，或一路文件管理标签。 */
-export type Kind = 'pty' | 'sftp';
+/**
+ * 通道种类。
+ *   pty  —— 一路终端标签（交互式 shell）
+ *   exec —— 一路非交互命令（批量执行：一路通道一条命令，输出流式回来）
+ *   sftp —— 一路文件管理标签
+ */
+export type Kind = 'pty' | 'exec' | 'sftp';
 
 export type Verb =
+  | 'hello'
   | 'open'
   | 'close'
   | 'resize'
@@ -16,12 +22,19 @@ export type Verb =
   | 'pong'
   | 'error'
   | 'ack'
+  | 'exit'
   | 'ls'
   | 'mkdir'
   | 'rm'
   | 'upload'
   | 'upload_end'
   | 'download';
+
+/**
+ * 协议版本。前后端必须一致：Cloudflare 一部署就是新版，而浏览器里的 SPA 可能是
+ * 三天前缓存的那一份。没有这个号，「点了没反应」与「代码坏了」从外部无法区分。
+ */
+export const PROTOCOL_VERSION = 2;
 
 export interface Envelope {
   type: string;
@@ -49,19 +62,16 @@ export interface FileItem {
   mtime: number;
 }
 
-export interface CmdsTestResult {
-  time_elapsed: number;
-  success: boolean;
-  output: string[];
-  error: string[];
-  node: ApiNode;
-  cmds: string;
-}
-
 // ===== 数据面 =====
 
 export const HEADER_LEN = 6;
 export const FLAG_END = 0x0001;
+/**
+ * FLAG_STDERR 这一片来自 stderr（exec 通道专用）。
+ * 不为 stderr 单开一路通道：一路命令就是一个通道，前端按标志分栏展示即可，
+ * 也免得两路流的结束顺序需要额外对齐。
+ */
+export const FLAG_STDERR = 0x0002;
 /** 单帧载荷上限。上传分片 64KB、终端输出 32KB，1MB 已经远超任何合规客户端。 */
 export const MAX_FRAME_PAYLOAD = 1 << 20;
 /** 控制帧上限：合法报文都是几百字节，64KB 已经足够宽松。 */
@@ -70,6 +80,8 @@ export const MAX_ENVELOPE_BYTES = 64 * 1024;
 export interface DataFrame {
   chan: number;
   end: boolean;
+  /** 这一片是不是 stderr（exec 通道）。 */
+  stderr: boolean;
   payload: Uint8Array;
 }
 
@@ -77,25 +89,28 @@ export interface DataFrame {
  * decodeFrame 解析一个二进制帧；帧头都凑不齐就返回 null（字节流已错位）。
  *
  * 这里补的校验只有载荷长度：以前任意大的帧都能进来，一路 memcpy 到业务层。
- * 未定义的标志位按 RFC 精神忽略（只认 FLAG_END），这样以后加标志不必先升服务端。
+ * 未定义的标志位按 RFC 精神忽略（只认 FLAG_END / FLAG_STDERR），
+ * 这样以后加标志不必先升服务端。
  */
 export function decodeFrame(buf: ArrayBuffer): DataFrame | null {
   if (buf.byteLength < HEADER_LEN) return null;
   if (buf.byteLength - HEADER_LEN > MAX_FRAME_PAYLOAD) return null;
   const view = new DataView(buf);
+  const flags = view.getUint16(4);
   return {
     chan: view.getUint32(0),
-    end: (view.getUint16(4) & FLAG_END) !== 0,
+    end: (flags & FLAG_END) !== 0,
+    stderr: (flags & FLAG_STDERR) !== 0,
     payload: new Uint8Array(buf, HEADER_LEN),
   };
 }
 
 /** encodeFrame 组装一帧，返回可直接 ws.send() 的字节。 */
-export function encodeFrame(chan: number, payload: Uint8Array, end = false): Uint8Array {
+export function encodeFrame(chan: number, payload: Uint8Array, end = false, stderr = false): Uint8Array {
   const out = new Uint8Array(HEADER_LEN + payload.byteLength);
   const view = new DataView(out.buffer);
   view.setUint32(0, chan);
-  view.setUint16(4, end ? FLAG_END : 0);
+  view.setUint16(4, (end ? FLAG_END : 0) | (stderr ? FLAG_STDERR : 0));
   out.set(payload, HEADER_LEN);
   return out;
 }

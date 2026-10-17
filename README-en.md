@@ -65,7 +65,7 @@ Scripts:
 | --- | --- |
 | `npm run dev` | Local dev server (builds the frontend first) |
 | `npm run deploy` | Deploy to Cloudflare |
-| `npm test` | Unit tests (450+ specs, ~5s, no network needed) |
+| `npm test` | Unit tests (459 specs, ~6s, no network needed) |
 | `npm run test:coverage` | Tests plus a coverage report (`coverage/index.html`) |
 | `npm run test:live` | One full handshake against a **real** SSH server (needs `LIVE_SSH_*`; skipped by default) |
 | `npm run typecheck` | TypeScript checks for both the source and the test config |
@@ -82,19 +82,19 @@ The port optimizes for "stable and simple", so a few mechanisms that exist for l
 | **Public addresses only** | Every resolved address is checked and private / loopback / reserved ranges are rejected (SSRF defence), and the connection is opened against the resolved IP directly (DNS-rebinding defence). `10.x`, `192.168.x`, `127.0.0.1` and friends are unreachable. |
 | **Unencrypted OpenSSH keys only** | Only passphrase-less keys starting with `-----BEGIN OPENSSH PRIVATE KEY-----` (Ed25519 / RSA / ECDSA) are accepted. Strip the passphrase first with `ssh-keygen -p -m OPENSSH -f <key-file>`. |
 
-Two implementation-level differences: host keys live in KV (TOFU) instead of `~/.managi/known_hosts`, and a batch command on a single node runs for at most 15 minutes before the connection is closed to kill the remote command — but the frontend's own HTTP timeout is 30 seconds, so anything that really runs for minutes will surface as a timeout in the UI first.
+One implementation-level difference: host keys live in KV (TOFU) instead of `~/.managi/known_hosts`.
 
 ## Security boundaries
 
-- **Credentials are never persisted** — node passwords and private keys appear only in the `open` frame and the two `POST` bodies. They are wiped from memory once authentication completes; they go neither into KV nor into Durable Object storage.
-- **Credentials never travel in URLs** — downloads and batch commands use `POST` with a body, so nothing lands in browser history or access logs.
+- **Credentials are never persisted** — node passwords and private keys appear only in the `open` frame. They are wiped from memory once authentication completes; they go neither into KV nor into Durable Object storage.
+- **Credentials never travel in URLs** — terminals and file transfers share one `/ws` connection, and credentials appear once in the `open` frame, so nothing lands in browser history or access logs.
 - **Host key verification (TOFU)** — this is the only thing standing between you and a man-in-the-middle. Credentials are supplied per request, so connecting to an impostor means handing over your password. Defaults to `tofu`; set `HOST_KEY_MODE=off` to disable, which is only advisable while debugging.
 - **The access password has two lanes** — besides HTTP Basic Auth, a successful first authentication issues an HttpOnly signed cookie. The reason is practical: browsers do not reliably attach cached Basic credentials to a WebSocket handshake, and a 401 on `/ws` leaves a page that looks fine but can never open a terminal. The cookie value is `expiry-timestamp.HMAC(timestamp)`, keyed off `MANAGI_AUTH` — **changing the password invalidates every issued cookie**, with no revocation table required.
 - **Cross-site WebSocket hijacking is blocked** — `/ws` requires `Origin` to match its own.
-- **CSRF is blocked** — both `POST` endpoints require `Sec-Fetch-Site` to be `same-origin` or `none` (absent = non-browser client, allowed through).
 - **Deny by default** — with no `MANAGI_AUTH` the service answers 503 plus setup instructions; public access requires an explicit `off`.
 - **First trust is visible** — on the first connection the recorded host-key fingerprint rides back in the `open` response and is surfaced once in the UI. It used to happen silently, which is exactly where a MITM wants to sit.
-- **Hard limits** — 10,000 directory entries (truncation is reported, not hidden), recursive delete capped at 64 levels / 10,000 entries, 2 GB per upload, 1 MB per data frame, 10 minutes per batch request. These are not about speed: they stop one request from eating the isolate's memory or the remote disk.
+- **File transfers have exactly one path** — uploads and downloads both use the `/ws` data plane, sharing the same authenticated connection as the terminal. There is no second HTTP channel, and therefore no second set of auth, timeout and Range semantics to keep correct.
+- **Hard limits** — 16 channels per WebSocket, 10,000 directory entries (truncation is reported, not hidden), 10,000 entries when reading a directory for recursive delete or stale-part cleanup (exceeding it is an error, never a partial list), recursive delete capped at 64 levels, **10 MB per upload and per download**, 1 MB per data frame. These are not about speed: they stop one file from eating the isolate's memory or the browser tab's.
 
 ## Troubleshooting
 
@@ -109,8 +109,8 @@ Two implementation-level differences: host keys live in KV (TOFU) instead of `~/
 | "First connection recorded host fingerprint …" | TOFU just pinned this host's key. Compare it with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the server. |
 | "SSH handshake timed out" | Port closed, firewall blocking, or an SSH server too old to support curve25519 / ecdh-nistp256. |
 | "Unsupported SFTP version" | The sshd SFTP subsystem is not v3; switch `Subsystem sftp` to `internal-sftp`. |
+| "File is 12.4MB, over the 10MB download limit" | The per-file limit is 10 MB for both directions. Move bigger files with `scp` / `rsync` from a terminal — the Worker orchestrates, it is not a large-file relay. |
 | A `xxx.part` file is left behind after a large upload | That is a resumable-upload fragment. Resuming with the same identity (same name, size and mtime) picks it up; delete it if you no longer need it. |
-| The batch-command page times out | The frontend gives those requests 30 seconds. Use a terminal tab for long-running commands. |
 
 Logs: Cloudflare dashboard → your Worker → **Logs** (live), or the terminal output of `npm run dev`.
 
@@ -119,15 +119,15 @@ Logs: Cloudflare dashboard → your Worker → **Logs** (live), or the terminal 
 ```
 managi-worker/
 ├── src/
-│   ├── worker.ts          # Entry: auth gate + /ws + three /api endpoints + asset fallback
+│   ├── worker.ts          # Entry: auth gate + /ws + /api/version + asset fallback
 │   ├── durable-object.ts  # One WebSocket = one DO: channel table, dispatch, per-channel serialization
 │   ├── session.ts         # SSH transport: handshake, auth, channel lifecycle, public API
-│   ├── handlers.ts        # The three channel handlers: PTY / SFTP / exec
+│   ├── handlers.ts        # The two channel handlers: PTY / SFTP
 │   ├── outbound.ts        # Serial queue for writing bytes into a channel (shared)
 │   ├── log.ts             # Structured event log (one event per line, JSON)
 │   ├── dial.ts            # Dialing: the only module in the project touching cloudflare:sockets
 │   ├── auth.ts            # Access password: Basic Auth + self-signed session cookie
-│   ├── node.ts            # Node validation and config conversion (shared by three entry points)
+│   ├── node.ts            # Node validation and config conversion
 │   ├── security.ts        # SSRF defence: reject private/reserved ranges after DNS resolution
 │   ├── host-keys.ts       # TOFU host keys, persisted in KV
 │   ├── protocol.ts        # Frontend/backend protocol (control frames + binary frames)
@@ -145,12 +145,12 @@ managi-worker/
 
 ## Developer notes
 
-- **Tests run on Node, not in workerd** — so they need no network access and no reachable sshd. What is exercised is the orchestration logic: `cloudflare:sockets` is aliased to a stub (its only consumer is `dial.ts`), and `SSHConnection` plus the three channel handlers are swapped out wholesale with `vi.mock`. `src/ssh/**` (the protocol stack baseline) is excluded from the coverage denominator — it only means anything against a real server.
+- **Tests run on Node, not in workerd** — so they need no network access and no reachable sshd. What is exercised is the orchestration logic: `cloudflare:sockets` is aliased to a stub (its only consumer is `dial.ts`), and `SSHConnection` plus the two channel handlers are swapped out wholesale with `vi.mock`. `src/ssh/**` (the protocol stack baseline) is excluded from the coverage denominator — it only means anything against a real server.
 - **The protocol is fixed** — zero frontend changes is a hard constraint, so don't invent fields. Control plane (text frames) is `{type, data, seq}`: `seq > 0` is request/response, `seq = 0` expects no reply or is a server push. Verbs: `open` / `close` / `resize` / `ping` / `pong` / `error` / `ack` / `ls` / `mkdir` / `rm` / `upload` / `upload_end` / `download`. Data plane (binary frames) is `[chan: u32 BE][flags: u16 BE][raw bytes]`, with `FLAG_END = 0x0001` ending the stream.
 - **`src/ssh/` is a baseline, not a no-go zone** — the stack starts from EdgeSSH but keeps being improved for this project: extra algorithm names, Encrypt-then-MAC, named parameters where positional ones were error-prone. What changed, why, and which test pins it all live in [`src/ssh/VENDOR.md`](src/ssh/VENDOR.md); read that before syncing upstream.
   - The one non-negotiable part is **byte layout and message numbering**: get those wrong and the connection simply fails, so they stay byte-for-byte with the spec.
   - Most valuable rule to remember: the packet parser's callbacks run inside the packet loop, so a callback must **never await something that needs the next inbound bytes** — those bytes are waiting for that very loop to consume them. This is what made SFTP hang for 30 seconds on every open.
 - **How the protocol stack gets verified** — the connection object that unit tests `vi.mock` away is exactly the part most likely to be wrong, so the critical paths have to go through a real handshake. Two routes:
-  - `npm run test:live` talks to a **real server** (`LIVE_SSH_HOST` / `LIVE_SSH_PORT` / `LIVE_SSH_USER` / `LIVE_SSH_KEY` pointing at a private key file): full handshake, public-key auth, exec. Unset those and it skips itself, so `npm test` never needs the network.
+  - `npm run test:live` talks to a **real server** (`LIVE_SSH_HOST` / `LIVE_SSH_PORT` / `LIVE_SSH_USER` / `LIVE_SSH_KEY` pointing at a private key file): full handshake, public-key auth, and a command typed into a terminal. Unset those and it skips itself, so `npm test` never needs the network.
   - `tests/live/etm_server.py` starts a paramiko server with ciphers pinned to `aes128-ctr` and MACs pinned to `hmac-sha2-256-etm@openssh.com` — the only setup that can exercise ETM. On an AEAD cipher the MAC is always `none`, so ETM never runs, and virtually every modern server offers AES-GCM. paramiko is used because it is an **independent implementation**; a round-trip test against ourselves proves nothing about interop.
 - **Syncing the upstream frontend** — overwrite all of `frontend/`, then restore the one `vite.config.ts` change that writes the bundle to `./dist` at the repo root.

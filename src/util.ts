@@ -1,6 +1,6 @@
 // Worker 侧的通用小工具：零依赖、纯函数（`ssh/utils.ts` 是报文编解码，与此无关）。
 //
-// 这三个东西原本在 worker.ts / durable-object.ts / session.ts 里各写了一份，
+// 这些函数原本在 worker.ts / durable-object.ts / session.ts 里各写了一份，
 // 收拢到这里只为了「同一件事只存在一处」——改一处即全站生效。
 
 /** messageOf 把任意抛出物取成可读文案：Error 取 message，其余 String 化。 */
@@ -11,14 +11,6 @@ export function messageOf(error: unknown): string {
 /** toError 把任意抛出物收成一个 Error。原样保留 Error 实例 —— 重新包一层会把栈洗掉。 */
 export function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
-}
-
-/** HttpError 携带要回给客户端的 HTTP 状态码，供顶层统一转成 JSON 响应。 */
-export class HttpError extends Error {
-  constructor(readonly status: number, message: string) {
-    super(message);
-    this.name = 'HttpError';
-  }
 }
 
 export interface Deferred<T> {
@@ -65,15 +57,4 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, message: string)
       (error) => { clearTimeout(timer); reject(error); },
     );
   });
-}
-
-/**
- * splitLines 按行拆分命令输出：保留中间空行、去掉末尾空行与行尾 \r。
- * CRLF 来自 Windows 上跑的远端命令，行尾留着 \r 会显示成怪符号。
- */
-export function splitLines(text: string): string[] {
-  if (text === '') return [];
-  const out = text.replace(/\n$/, '').split('\n').map((line) => line.replace(/\r+$/, ''));
-  while (out.length > 0 && out[out.length - 1] === '') out.pop();
-  return out;
 }

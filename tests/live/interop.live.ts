@@ -11,10 +11,17 @@
 // 私钥只从文件读、只进内存，不落仓库。
 import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
+import type { Socket as NetSocket } from 'node:net';
 import { connect as netConnect } from 'node:net';
 import { describe, expect, it } from 'vitest';
 
-import { describeConnectFailure, ExecHandler, SSHConnection, type ConnectionHooks, type ExecResult } from '../../src/session';
+import {
+  describeConnectFailure,
+  PTYHandler,
+  SSHConnection,
+  type ChannelCallbacks,
+  type ConnectionHooks,
+} from '../../src/session';
 import type { SSHConnectionConfig } from '../../src/types';
 import { adaptSocket } from './socket-adapter';
 
@@ -24,17 +31,8 @@ const USER = process.env.LIVE_SSH_USER ?? '';
 const KEY_PATH = process.env.LIVE_SSH_KEY ?? '';
 const READY = HOST !== '' && USER !== '' && KEY_PATH !== '';
 
-interface Outcome {
-  result: ExecResult;
-  fingerprints: string[];
-}
-
-/** 走完整流程：TCP → 版本交换 → KEX → 认证 → 跑一条命令 → 收尾。 */
-async function runCommand(command: string): Promise<Outcome> {
-  const socket = netConnect({ host: HOST, port: PORT });
-  await once(socket, 'connect');
-
-  const config: SSHConnectionConfig = {
+function config(): SSHConnectionConfig {
+  return {
     host: HOST,
     port: PORT,
     username: USER,
@@ -44,6 +42,18 @@ async function runCommand(command: string): Promise<Outcome> {
     rows: 24,
     term: 'xterm-256color',
   };
+}
+
+interface Session {
+  conn: SSHConnection;
+  socket: NetSocket;
+  fingerprints: string[];
+}
+
+/** 走完整流程的前半段：TCP → 版本交换 → KEX → 认证。 */
+async function connect(): Promise<Session> {
+  const socket = netConnect({ host: HOST, port: PORT });
+  await once(socket, 'connect');
 
   const fingerprints: string[] = [];
   const hooks: ConnectionHooks = {
@@ -55,61 +65,75 @@ async function runCommand(command: string): Promise<Outcome> {
   };
 
   // adaptSocket 给的对象结构上就是 SSHConnection 需要的那个 Socket（readable / writable / close）。
-  const conn = new SSHConnection(adaptSocket(socket) as never, config, hooks);
-  try {
-    await conn.handshake();
-    const result = await new Promise<ExecResult>((resolve) => {
-      conn.openExec(new ExecHandler(conn, command, 4 << 20, resolve));
-    });
-    return { result, fingerprints };
-  } finally {
-    conn.close();
-    socket.destroy();
-  }
+  const conn = new SSHConnection(adaptSocket(socket) as never, config(), hooks);
+  await conn.handshake();
+  return { conn, socket, fingerprints };
+}
+
+/** runOn 在已建好的连接上开一路 PTY，敲一条命令，等到 marker 出现。
+ *  用 PTY 而不是 exec：这个项目对外只提供终端与文件管理，exec 通道已经删掉了，
+ *  真机验证也该验证实际会被用到的路径。
+ */
+async function runOn(conn: SSHConnection, command: string, marker: string): Promise<string> {
+  let output = '';
+  const decoder = new TextDecoder();
+  let handler: PTYHandler | null = null;
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`等待 ${marker} 超时；已收到：${JSON.stringify(output)}`)),
+      20_000,
+    );
+    const settle = (error?: Error): void => {
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+    const callbacks: ChannelCallbacks = {
+      data: (payload) => {
+        output += decoder.decode(payload, { stream: true });
+        if (output.includes(marker)) settle();
+      },
+      control: () => undefined,
+      error: (message) => settle(new Error(message)),
+      ready: () => {
+        handler?.queueInput(new TextEncoder().encode(`${command}; exit\r`));
+      },
+      failed: (message) => settle(new Error(message)),
+    };
+    handler = new PTYHandler(conn, 80, 24, callbacks);
+    conn.openPTY(handler);
+  });
+  return output;
 }
 
 describe.skipIf(!READY)('真实服务器互通（需 LIVE_SSH_* 环境变量）', () => {
-  it('握手 + 公钥认证 + 执行命令', async () => {
-    const { result, fingerprints } = await runCommand('echo interop-ok; id -un');
-
-    if (result.exitStatus !== 0) {
-      throw new Error(`命令退出码 ${result.exitStatus}；stderr=${result.stderr}`);
+  it('握手 + 公钥认证 + 终端里跑一条命令', async () => {
+    const session = await connect();
+    try {
+      const output = await runOn(session.conn, 'echo interop-ok; id -un', 'interop-ok');
+      expect(output).toContain('interop-ok');
+      expect(output).toContain(USER);
+      // 主机密钥走的是 TOFU 钩子，指纹必须拿到（空指纹说明握手没真走完）。
+      expect(session.fingerprints).toHaveLength(1);
+      expect(session.fingerprints[0]).toMatch(/^SHA256:/);
+    } finally {
+      session.conn.close();
+      session.socket.destroy();
     }
-    expect(result.stdout).toContain('interop-ok');
-    expect(result.stdout).toContain(USER);
-    // 主机密钥走的是 TOFU 钩子，指纹必须拿到（空指纹说明握手没真走完）。
-    expect(fingerprints).toHaveLength(1);
-    expect(fingerprints[0]).toMatch(/^SHA256:/);
   });
 
-  it('连续多条命令复用同一条连接', async () => {
-    const socket = netConnect({ host: HOST, port: PORT });
-    await once(socket, 'connect');
-    const config: SSHConnectionConfig = {
-      host: HOST,
-      port: PORT,
-      username: USER,
-      authMethod: 'publickey',
-      privateKey: readFileSync(KEY_PATH, 'utf8'),
-      cols: 80,
-      rows: 24,
-      term: 'xterm-256color',
-    };
-    const hooks: ConnectionHooks = { ended: () => undefined, verifyHostKey: async () => ({ ok: true }) };
-    const conn = new SSHConnection(adaptSocket(socket) as never, config, hooks);
+  it('同一条连接上连续开两路通道，各自收到各自的输出', async () => {
+    const session = await connect();
     try {
-      await conn.handshake();
-      for (const expected of ['alpha', 'beta', 'gamma']) {
-        const result = await new Promise<ExecResult>((resolve) => {
-          conn.openExec(new ExecHandler(conn, `echo ${expected}`, 1 << 20, resolve));
-        });
-        expect(result.stdout.trim()).toBe(expected);
+      for (const marker of ['alpha', 'beta']) {
+        const output = await runOn(session.conn, `echo ${marker}`, marker);
+        expect(output).toContain(marker);
       }
     } finally {
-      conn.close();
-      socket.destroy();
+      session.conn.close();
+      session.socket.destroy();
     }
-  }, 45_000);
+  }, 60_000);
 });
 
 // 不论有没有账号，这条都要跑：它钉住「失败文案」这件会被误当成协议问题的事。

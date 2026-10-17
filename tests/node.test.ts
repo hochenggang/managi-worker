@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { COLS, ROWS, buildNodeConfig, clampCols, clampRows, maskNode, validateNode } from '../src/node';
+import { COLS, ROWS, buildNodeConfig, clampCols, clampRows, validateNode } from '../src/node';
 import type { ApiNode } from '../src/protocol';
 
 const base: ApiNode = { host: 'example.com', port: 22, username: 'root', auth_value: 'pw' };
@@ -128,22 +128,5 @@ describe('buildNodeConfig', () => {
     const config = buildNodeConfig(node({ auth_type: undefined }), 80, 24);
     expect(config.authMethod).toBe('password');
     expect(config.password).toBe('pw');
-  });
-});
-
-describe('maskNode', () => {
-  it('只把凭据换成 ***，其余字段原样保留', () => {
-    const original = node({ name: '生产机', group: 'prod' });
-    const masked = maskNode(original);
-    expect(masked).toEqual({ ...original, auth_value: '***' });
-    expect(masked.name).toBe('生产机');
-    expect(masked.group).toBe('prod');
-  });
-
-  it('返回副本，不改动入参（调用方还在用原对象做连接）', () => {
-    const original = node({});
-    const masked = maskNode(original);
-    expect(masked).not.toBe(original);
-    expect(original.auth_value).toBe('pw');
   });
 });

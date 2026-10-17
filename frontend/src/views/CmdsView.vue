@@ -17,29 +17,61 @@
         ></textarea>
 
         <div class="command-actions">
-          <ButtonWithSpinner class="execute-button" :loading="isExecuting" :action="executeCommand">
-            {{ isExecuting ? t("cmdPanel.executing") : t("cmdPanel.executeCommand") }}
-          </ButtonWithSpinner>
+          <button
+            v-if="!batch.running.value"
+            class="execute-button small-button"
+            :disabled="!canRun"
+            @click="triggerExecute"
+          >
+            {{ t("cmdPanel.executeCommand") }}
+          </button>
+          <button v-else class="execute-button small-button stop-button" @click="batch.cancel()">
+            {{ t("cmdPanel.stop") }}
+          </button>
           <button class="small-button save-button" @click="startAddShortcut" :disabled="command.length < 2">
-            <!-- {{ t("cmdPanel.saveShortCut") }} -->
             <IconSave style="fill: currentColor;" />
           </button>
+          <span class="hint">{{ hint }}</span>
         </div>
       </div>
 
-      <ul v-auto-animate class="results">
-        <li v-for="(result, index) in executionResults" :key="generateNodeId(result.node) + index" class="result">
+      <ul class="results">
+        <li v-for="row in batch.rows.value" :key="row.id" class="result">
           <div class="result-header">
-            <strong :class="{ 'success': result.success, 'failed': !result.success }">
-              {{ nodesStore.getNodeById(generateNodeId(result.node))?.name || result.node.host }}
+            <strong :class="stateClass(row)">
+              {{ nodesStore.getNodeById(row.id)?.name || row.node.host }}
             </strong>
-            <span class="execution-time">{{ result.time_elapsed }}s</span>
+            <span class="execution-time">
+              <span v-if="row.state !== 'queued'">{{ stateText(row) }}</span>
+              <span v-if="row.elapsedMs > 0"> · {{ (row.elapsedMs / 1000).toFixed(1) }}s</span>
+            </span>
           </div>
-          <div class="output-block" v-if="result.output && result.output.length > 0">
-            <pre><code>{{ joinLines(result.output) }}</code><button class="small-button copy-button" @click="copyCode(joinLines(result.output))">{{ t('cmdPanel.copy') }}</button></pre>
+
+          <div class="output-block error-block" v-if="row.error">
+            <pre><code>{{ row.error }}</code></pre>
           </div>
-          <div class="output-block error-block" v-if="result.error && result.error.length > 0">
-            <pre><code>{{ joinLines(result.error) }}</code><button class="small-button copy-button" @click="copyCode(joinLines(result.error))">{{ t('cmdPanel.copy') }}</button></pre>
+
+          <div class="output-block" v-if="row.stdout">
+            <pre><code>{{ row.stdout }}</code><button class="small-button copy-button" @click="copyCode(row.stdout)">{{ t('cmdPanel.copy') }}</button></pre>
+          </div>
+
+          <!-- stderr 单独一块：批量执行里「报错在哪」比「输出了什么」更要紧，
+               混进 stdout 就再也分不出来了 -->
+          <div class="output-block error-block" v-if="row.stderr">
+            <pre><code>{{ row.stderr }}</code><button class="small-button copy-button" @click="copyCode(row.stderr)">{{ t('cmdPanel.copy') }}</button></pre>
+          </div>
+
+          <div class="output-block running-block" v-if="row.state === 'running' && !row.stdout && !row.stderr">
+            <pre><code>{{ t('cmdPanel.executing') }}</code></pre>
+          </div>
+
+          <div class="result-footer" v-if="row.state === 'done' || row.state === 'failed'">
+            <span v-if="row.code === null" class="warn">{{ t('cmdPanel.unknownCode') }}</span>
+            <span v-else-if="row.code !== 0" class="warn">{{ t('cmdPanel.exitCode') }} {{ row.code }}</span>
+            <span v-if="row.truncatedStdout || row.truncatedStderr" class="warn">
+              {{ t('cmdPanel.serverTruncated') }}
+            </span>
+            <span v-if="row.trimmed" class="warn">{{ t('cmdPanel.displayTrimmed') }}</span>
           </div>
         </li>
       </ul>
@@ -59,19 +91,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import Modal from "@/components/Modal.vue";
-import ButtonWithSpinner from "@/components/ButtonWithSpinner.vue";
 import QuickCommandPanel from "@/components/QuickCommandPanel.vue";
 import { useNodesStore } from '@/stores/nodesStore';
 import { useShortcutsStore } from '@/stores/shortcutsStore';
-import { generateNodeId } from '@/protocol/types';
 import { handleError, handleMsg } from "@/helper";
-import { batchSSH } from '@/api';
 import { useConfirm } from '@/composables/useConfirm';
-import type { CmdsTestResult } from '@/protocol/types';
+import { useBatchExec, type ExecRow } from '@/composables/useBatchExec';
 import IconSave from '@/components/icons/IconSave.vue';
 
 const { t } = useI18n()
@@ -79,18 +108,27 @@ const nodesStore = useNodesStore();
 const shortcutsStore = useShortcutsStore();
 shortcutsStore.load();
 
+const batch = useBatchExec()
+
 const command = ref('');
-const executionResults = ref<CmdsTestResult[]>([]);
 const newShortcutLabel = ref('');
 const showAddShortcutModal = ref(false);
-const isExecuting = ref(false);
+
+const canRun = computed(() => command.value.length >= 2 && nodesStore.selectedNodes.length > 0)
+
+const hint = computed(() => {
+  const count = nodesStore.selectedNodes.length
+  if (!count) return t('cmdPanel.nothingSelected')
+  if (count > 1) return t('cmdPanel.parallelHint', { n: batch.concurrency.value })
+  return ''
+})
 
 const startAddShortcut = () => {
   if (command.value.length < 2) {
     handleError(t("cmdPanel.noCmd"));
-  } else {
-    showAddShortcutModal.value = true;
+    return
   }
+  showAddShortcutModal.value = true;
 };
 
 const confirmAddShortcut = () => {
@@ -113,49 +151,43 @@ const handleRenameShortcut = (index: number) => {
 const { confirm } = useConfirm()
 
 const handleDeleteShortcut = async (index: number) => {
-  // 用 Modal 确认对话框替代原生 confirm()
   if (await confirm(t('cmdPanel.shortcutDeleteConfirm'))) {
     shortcutsStore.remove(index)
   }
 }
 
+/** triggerExecute 由按钮与 Ctrl+Enter 共用。
+ *  校验失败必须出声：旧实现把验证错误静默吞掉，用户以为点了没反应。
+ */
 const triggerExecute = () => {
-  // 原 .catch(() => {}) 静默吞掉验证错误（emptyCmd/nothingSelected），用户无反馈
-  executeCommand().catch((e: unknown) => {
-    // executeCommand 内部已对 batchSSH 失败做 try/catch+handleError，
-    // 此处仅处理它主动抛出的验证错误
-    handleError(e)
-  })
-}
-
-const executeCommand = async () => {
   if (command.value.length < 2) {
-    throw new Error(t("cmdPanel.emptyCmd"));
+    handleError(t('cmdPanel.emptyCmd'))
+    return
   }
   if (nodesStore.selectedNodes.length === 0) {
-    throw new Error(t("cmdPanel.nothingSelected"));
+    handleError(t('cmdPanel.nothingSelected'))
+    return
   }
+  // 多行命令原样交给远端 shell：一次 exec 跑完整个脚本，
+  // 比按行发 N 次更接近用户在大终端里粘贴一段脚本的心智模型。
+  void batch.run(nodesStore.getSelectedNodes, command.value)
+}
 
-  isExecuting.value = true;
-  executionResults.value = [];
-
-  const selectedNodes = nodesStore.getSelectedNodes;
-  const cmds = command.value.split('\n');
-
-  try {
-    const results = await batchSSH(selectedNodes, cmds);
-    executionResults.value = results;
-  } catch (error) {
-    // handleError 已放宽为 unknown，自动归一化 Error 为 message
-    console.error(error)
-    handleError(error)
-  } finally {
-    isExecuting.value = false;
+function stateText(row: ExecRow): string {
+  switch (row.state) {
+    case 'queued': return t('cmdPanel.queued')
+    case 'running': return t('cmdPanel.executing')
+    case 'done': return t('cmdPanel.done')
+    case 'failed': return t('cmdPanel.failed')
+    case 'cancelled': return t('cmdPanel.cancelled')
   }
-};
+}
 
-// 展示与复制共用同一份拼接结果，避免复制丢换行
-const joinLines = (lines: string[]) => lines.join('\n')
+function stateClass(row: ExecRow): string {
+  if (row.state === 'done') return 'success'
+  if (row.state === 'failed') return 'failed'
+  return ''
+}
 
 const copyCode = (text: string) => {
   navigator.clipboard.writeText(text).then(() => {
@@ -164,6 +196,10 @@ const copyCode = (text: string) => {
     handleError(t("cmdPanel.copyError") + err);
   });
 };
+
+// 标签页会被 tabsStore 保活（v-show），关标签不一定触发卸载；
+// 但真卸载时把在跑的通道收掉，否则远端进程会一直跑到自己结束。
+onUnmounted(() => batch.cancel())
 </script>
 
 <style scoped>
@@ -195,8 +231,6 @@ const copyCode = (text: string) => {
   width: 100%;
   height: 7rem;
   padding: 0.5rem;
-  /* background-color: var(--color-input-bg);
-  border: 1px solid var(--color-border); */
   border-radius: 0;
   font-size: 0.7rem;
   color: var(--color-font-1);
@@ -205,6 +239,7 @@ const copyCode = (text: string) => {
 
 .command-actions {
   display: flex;
+  align-items: center;
   gap: 0.5rem;
 }
 
@@ -212,9 +247,18 @@ const copyCode = (text: string) => {
   font-size: 0.7rem;
 }
 
+.stop-button {
+  color: var(--color-red);
+}
+
 .save-button {
   font-size: 0.7rem;
   flex-shrink: 0;
+}
+
+.hint {
+  font-size: 0.65rem;
+  color: var(--color-font-3);
 }
 
 .results {
@@ -281,6 +325,21 @@ const copyCode = (text: string) => {
 
 .error-block {
   border-left: 3px solid var(--color-orange);
+}
+
+.running-block {
+  opacity: 0.7;
+}
+
+.result-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  font-size: 0.65rem;
+}
+
+.warn {
+  color: var(--color-orange);
 }
 
 .copy-button {

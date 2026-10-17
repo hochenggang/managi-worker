@@ -1,6 +1,6 @@
 // 真服务器上的 SFTP 通道验证。
 //
-// 握手能过、exec 能跑，不代表 SFTP 能开：子系统请求、SFTP 协议握手（INIT/VERSION）、
+// 握手能过、终端能开，不代表 SFTP 能开：子系统请求、SFTP 协议握手（INIT/VERSION）、
 // realpath 都会各自出错，而它们在单测里全是被 mock 掉的那部分。所以单独验一遍。
 //
 // 用法同 interop.live.ts（LIVE_SSH_* 环境变量），另外可用 LIVE_SSH_DIR 指定要列的目录。

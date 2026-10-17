@@ -2,20 +2,18 @@
 //
 // 目录操作走控制面（一问一答，靠 seq 关联），文件字节走数据面（分片帧 + FLAG_END）。
 // 断线重连由枢纽负责：通道重开成功后把用户当前所在目录重新列出来即可。
-// 大文件不走 WS：见 downloadViaHTTP（HTTP Range 流式，避免浏览器内存累积）。
+// 文件内容一律走这条 WS（没有第二条 HTTP 通道），所以上传下载都设同一个 10MB 上限。
 
 import { computed, ref, watch } from 'vue'
 import { uiStatus, useWSHub } from './useWSHub'
-import { downloadWithRange } from '@/api'
 import { handleError, toErrorMessage } from '@/helper'
 import type { ErrorData, OpenResponse, OpenSFTP } from '@/protocol/ws'
 import type { DownloadData, LSData, SFTPFile, UploadData } from '@/protocol/sftp'
 import type { ApiNode } from '@/protocol/types'
 
-// WS 下载缓冲上限：超此大小中止并提示走 HTTP Range 流式下载，避免浏览器 OOM。
-const DOWNLOAD_BUFFER_LIMIT = 256 * 1024 * 1024
-// 超过此大小的文件应改走 HTTP Range 流式下载。导出供调用方统一判定。
-export const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024
+// 单个文件的上传与下载上限，与后端 SFTPHandler.MAX_FILE_BYTES 保持一致。
+// 下载会把整份文件读进内存再落盘，10MB 是「够用又不至于顶爆标签页」的分界。
+export const MAX_FILE_BYTES = 10 * 1024 * 1024
 // FLAG_END 空帧的载荷：只用来表达「写完了，请落定」。
 const NO_BYTES = new Uint8Array(0)
 
@@ -66,8 +64,8 @@ export function useSFTP(node: ApiNode) {
       // 只接纳下载在跑时的帧：服务端在上传方向不该发数据帧，误投的丢掉。
       if (!stream || stream.kind !== 'download') return
       if (payload.byteLength) {
-        if (received + payload.byteLength > DOWNLOAD_BUFFER_LIMIT) {
-          failDownload(`文件超过 ${DOWNLOAD_BUFFER_LIMIT / 1024 / 1024}MB，请改用流式下载`)
+        if (received + payload.byteLength > MAX_FILE_BYTES) {
+          failDownload(`文件超过 ${MAX_FILE_BYTES / 1024 / 1024}MB 下载上限`)
           return
         }
         chunks.push(payload)
@@ -172,6 +170,10 @@ export function useSFTP(node: ApiNode) {
   // ===== 上传：upload 请求 → 数据面分片 → FLAG_END 落定 → upload_end =====
 
   async function upload(remoteDir: string, file: File): Promise<void> {
+    // 与下载同一口径：超上限直接说清楚，不把 10MB 的文件切成几千片再被服务端拒绝。
+    if (file.size > MAX_FILE_BYTES) {
+      throw new Error(`文件 ${formatSize(file.size)}，超过上传上限 ${MAX_FILE_BYTES / 1024 / 1024}MB`)
+    }
     uploadProgress.value = 0
     streamErr = null
     const done = startStream('upload')
@@ -206,7 +208,14 @@ export function useSFTP(node: ApiNode) {
 
   // ===== 下载：download 请求 → 数据面分片直到 FLAG_END =====
 
-  async function download(remotePath: string): Promise<void> {
+  /** download 下载一个远端文件。
+   *  size 是列表里已知的大小：先判上限，超了就直接说清楚，不必开连接白跑一趟。
+   *  服务端仍会自己再判一次（列表可能是旧的）。
+   */
+  async function download(remotePath: string, size?: number): Promise<void> {
+    if (size !== undefined && size > MAX_FILE_BYTES) {
+      throw new Error(`文件 ${formatSize(size)}，超过下载上限 ${MAX_FILE_BYTES / 1024 / 1024}MB`)
+    }
     resetDownload()
     const done = startStream('download')
     try {
@@ -221,40 +230,6 @@ export function useSFTP(node: ApiNode) {
     }
   }
 
-  /** downloadViaHTTP 大文件流式下载（HTTP Range）。
-   *  WS 下载会把整份文件缓冲在内存里，GB 级文件必然 OOM；调用方在文件已知较大
-   *  （超 LARGE_FILE_THRESHOLD）时应直接用本方法。
-   *  有 File System Access 就逐块写进用户选定的文件（字节不进内存），
-   *  没有才退回缓冲成 Blob 的老路——那条路确实吃内存，所以上限必须留着。
-   */
-  async function downloadViaHTTP(remotePath: string): Promise<void> {
-    downloadProgress.value = 0
-    const name = basename(remotePath)
-    const pick = saveFilePicker()
-    let handle: FileHandle | null = null
-    if (pick) {
-      // 先弹保存框：showSaveFilePicker 要求用户手势，而在手势过期前未必等得到首字节
-      try {
-        handle = await pick({ suggestedName: name })
-      } catch (e) {
-        if (isUserCancel(e)) return // 用户按取消不是故障，静默收尾
-        throw e
-      }
-    }
-    try {
-      const { total, stream } = await downloadWithRange(node, remotePath, 0)
-      const onBytes = (got: number): void => {
-        downloadProgress.value = percent(got, total)
-      }
-      if (handle) await writeToDisk(handle, stream, onBytes)
-      else await saveViaBlob(stream, name, onBytes)
-      downloadProgress.value = 100
-    } catch (e) {
-      downloadProgress.value = 0
-      throw e
-    }
-  }
-
   function close(): void {
     stopStateWatch()
     settleStream(new Error('文件管理已关闭'))
@@ -263,7 +238,7 @@ export function useSFTP(node: ApiNode) {
 
   return {
     currentPath, files, loading, uploadProgress, downloadProgress,
-    status, list, upload, download, downloadViaHTTP, mkdir, del, close,
+    status, list, upload, download, mkdir, del, close,
   }
 }
 
@@ -272,84 +247,10 @@ function percent(done: number, total: number): number {
   return total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0
 }
 
-/** forEachChunk 逐块交给回调，读完释放 reader。流式下载的两条落盘路共用这个骨架。 */
-async function forEachChunk(
-  body: ReadableStream<Uint8Array>,
-  fn: (chunk: Uint8Array) => Promise<void>,
-): Promise<void> {
-  const reader = body.getReader()
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      if (value) await fn(value)
-    }
-  } finally {
-    reader.releaseLock()
-  }
-}
-
-// File System Access 里我们只用这三个成员，不必拉进整套 DOM 类型定义。
-interface DiskWritable {
-  write(data: Uint8Array): Promise<void>
-  close(): Promise<void>
-  abort(): Promise<void>
-}
-interface FileHandle {
-  createWritable(): Promise<DiskWritable>
-}
-
-function saveFilePicker(): ((opts: { suggestedName: string }) => Promise<FileHandle>) | null {
-  const w = window as unknown as { showSaveFilePicker?: (opts: { suggestedName: string }) => Promise<FileHandle> }
-  return typeof w.showSaveFilePicker === 'function' ? w.showSaveFilePicker : null
-}
-
-function isUserCancel(e: unknown): boolean {
-  return (e as { name?: string } | undefined)?.name === 'AbortError'
-}
-
-/** writeToDisk 把响应体直接写进用户选定的文件：字节过完即 close，全程不堆在内存里。
- *  中途失败必须 abort()——否则半截文件会被当成完整的一份留在盘上。
- */
-async function writeToDisk(
-  handle: FileHandle,
-  body: ReadableStream<Uint8Array>,
-  onBytes: (got: number) => void,
-): Promise<void> {
-  const writable = await handle.createWritable()
-  let got = 0
-  try {
-    await forEachChunk(body, async (chunk) => {
-      await writable.write(chunk)
-      got += chunk.byteLength
-      onBytes(got)
-    })
-    await writable.close()
-  } catch (e) {
-    await writable.abort().catch(() => {})
-    throw e
-  }
-}
-
-/** saveViaBlob 旧路径：缓冲成 Blob 再用 <a download> 触发浏览器保存。
- *  整份文件都在内存里，所以超过 DOWNLOAD_BUFFER_LIMIT 就中止。
- */
-async function saveViaBlob(
-  body: ReadableStream<Uint8Array>,
-  filename: string,
-  onBytes: (got: number) => void,
-): Promise<void> {
-  const parts: Uint8Array[] = []
-  let got = 0
-  await forEachChunk(body, async (chunk) => {
-    if (got + chunk.byteLength > DOWNLOAD_BUFFER_LIMIT) {
-      throw new Error(`文件超过 ${DOWNLOAD_BUFFER_LIMIT / 1024 / 1024}MB 下载上限`)
-    }
-    parts.push(chunk)
-    got += chunk.byteLength
-    onBytes(got)
-  })
-  triggerDownload(new Blob(parts as BlobPart[]), filename)
+/** formatSize 把字节数说成人能看懂的大小（与后端 formatMB 同口径）。 */
+function formatSize(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)}KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`
 }
 
 function basename(p: string): string {

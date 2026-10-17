@@ -1,11 +1,9 @@
-// 三种通道处理器：PTY（终端）、SFTP（文件管理）、exec（一次性命令）。
+// 两种通道处理器：PTY（终端）、SFTP（文件管理）。
 //
-// 为什么单独一个文件：session.ts 之前同时住着 SSH 传输编排、认证流程和这三个处理器，
+// 为什么单独一个文件：session.ts 之前同时住着 SSH 传输编排、认证流程和这些处理器，
 // 1700 行里谁都能改到谁。传输与「通道里干什么」是两件事，改一个不该顺手动到另一个。
-// 这三个类只依赖 SSHConnection 的公开方法，不碰传输层内部状态。
+// 这两个类只依赖 SSHConnection 的公开方法，不碰传输层内部状态。
 
-import { SSH_MSG_CHANNEL_REQUEST } from './types';
-import { encodeString, writeUint32 } from './ssh/utils';
 import { SFTPClient, SFTP_OPEN_FLAGS, type SFTPAttrs } from './ssh/sftp';
 import type { SSHChannel } from './ssh/channel';
 import { messageOf } from './util';
@@ -118,10 +116,6 @@ export class PTYHandler implements ChannelHandler {
     this.cb.failed(message);
   }
 
-  onExitStatus(): void {
-    // 终端场景用不到退出码；通道关闭时前端会看到「会话已结束」。
-  }
-
   onWindowAdjust(): void {
     void this.outbound.flush();
   }
@@ -139,6 +133,126 @@ export class PTYHandler implements ChannelHandler {
   }
 }
 
+// ===== EXEC =====
+
+/**
+ * ExecHandler 一路非交互命令（批量执行的一路）。
+ *
+ * 与 PTY 的区别不止「要不要 PTY」：stdout 与 stderr 天然分开、没有窗口流控、
+ * 也不需要输入。因此它只做三件事：发 exec 请求、把两路输出带标志转发、报退出码。
+ *
+ * 「命令跑了但返回非零」与「通道坏了」必须能被前端分开：前者是结果（exit 帧），
+ * 后者是错误（error 帧）。混在一起的话，批量执行会把失败报成成功，或反过来。
+ */
+export class ExecHandler implements ChannelHandler {
+  /** 单路（stdout / stderr 各自）输出上限：`yes`、`cat /dev/urandom` 不能让 isolate 吃满内存。 */
+  static readonly MAX_STREAM_BYTES = 4 * 1024 * 1024;
+  /** 响应写出前最多替对端缓冲多少输出；正常情况 server 先回 SUCCESS 再发数据，用不到这么大。 */
+  private static readonly PRE_START_LIMIT = 256 * 1024;
+
+  private channel: SSHChannel | null = null;
+  private closed = false;
+  private started = false;
+  private exitCode: number | null = null;
+  private readonly sent = { stdout: 0, stderr: 0 };
+  private readonly truncated = { stdout: false, stderr: false };
+  /** 响应写出之前先攒着：否则前端会先收到一批还不认识 chan 的字节。 */
+  private queue: Array<{ chunk: Uint8Array; stderr: boolean }> = [];
+  private queuedBytes = 0;
+
+  constructor(
+    private readonly conn: SSHConnection,
+    private readonly command: string,
+    private readonly cb: ChannelCallbacks,
+  ) {}
+
+  async onOpened(channel: SSHChannel): Promise<void> {
+    this.channel = channel;
+    await this.conn.sendEncrypted(channel.buildExecRequest(this.command));
+  }
+
+  async onRequestResult(success: boolean): Promise<void> {
+    if (!success) {
+      this.cb.failed('服务器拒绝执行该命令');
+      this.conn.close();
+      return;
+    }
+    this.cb.ready();
+  }
+
+  /** start 由上层在 open 响应写出之后调用：把攒下的输出按序放出去。 */
+  start(): void {
+    if (this.started) return;
+    this.started = true;
+    const queued = this.queue;
+    this.queue = [];
+    this.queuedBytes = 0;
+    for (const item of queued) this.emit(item.chunk, item.stderr);
+  }
+
+  onData(chunk: Uint8Array): void {
+    this.accept(chunk, false);
+  }
+
+  onExtendedData(chunk: Uint8Array): void {
+    this.accept(chunk, true);
+  }
+
+  onEof(): void { /* exec 的收尾走 onClose：EOF 之后还有 exit-status */ }
+
+  onClose(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.cb.control({
+      type: 'exit',
+      data: {
+        code: this.exitCode,
+        truncated_stdout: this.truncated.stdout,
+        truncated_stderr: this.truncated.stderr,
+      },
+    });
+    this.cb.data(new Uint8Array(0), true);
+  }
+
+  onWindowAdjust(): void { /* exec 没有输入方向，窗口无用 */ }
+
+  onOpenFailure(message: string): void {
+    this.cb.failed(message);
+  }
+
+  onExitStatus(code: number): void {
+    this.exitCode = code;
+  }
+
+  private accept(chunk: Uint8Array, stderr: boolean): void {
+    if (this.closed || chunk.length === 0) return;
+    if (!this.started) {
+      if (this.queuedBytes + chunk.length > ExecHandler.PRE_START_LIMIT) {
+        // 服务端没等 SUCCESS 就灌数据：丢掉超出的部分，但仍然如实标记截断。
+        this.truncated[stderr ? 'stderr' : 'stdout'] = true;
+        return;
+      }
+      this.queue.push({ chunk, stderr });
+      this.queuedBytes += chunk.length;
+      return;
+    }
+    this.emit(chunk, stderr);
+  }
+
+  private emit(chunk: Uint8Array, stderr: boolean): void {
+    const key = stderr ? 'stderr' : 'stdout';
+    const room = ExecHandler.MAX_STREAM_BYTES - this.sent[key];
+    if (room <= 0) {
+      this.truncated[key] = true;
+      return;
+    }
+    const slice = chunk.length > room ? chunk.subarray(0, room) : chunk;
+    if (chunk.length > room) this.truncated[key] = true;
+    this.sent[key] += slice.length;
+    this.cb.data(slice, false, stderr);
+  }
+}
+
 // ===== SFTP =====
 
 /** SFTPHandler 一路文件管理：目录操作走控制面，字节走数据面。 */
@@ -153,8 +267,14 @@ export class SFTPHandler implements ChannelHandler {
   static readonly MAX_REMOVE_DEPTH = 64;
   /** 一次递归删除最多处理多少条。 */
   static readonly MAX_REMOVE_ENTRIES = 10_000;
-  /** 单个文件的上传上限。 */
-  static readonly MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
+  /**
+   * 单个文件的上传与下载上限，两边共用一个数。
+   *
+   * 下载走 WS、整份缓冲在浏览器内存里（没有第二条流式通道了），10MB 是
+   * 「够传配置与日志、又不至于把标签页顶爆」的分界。超过就明确拒绝，
+   * 不做截断——半个文件比没有文件更糟。
+   */
+  static readonly MAX_FILE_BYTES = 10 * 1024 * 1024;
 
   private channel: SSHChannel | null = null;
   private client: SFTPClient | null = null;
@@ -250,7 +370,6 @@ export class SFTPHandler implements ChannelHandler {
     this.cb.failed(message);
   }
 
-  onExitStatus(): void { /* sftp 子系统没有退出码 */ }
 
   onWindowAdjust(): void {
     void this.outbound.flush();
@@ -363,8 +482,18 @@ export class SFTPHandler implements ChannelHandler {
     await client.rmdir(path);
   }
 
-  /** readDirectory 读出全部条目。READDIR 的属性是条目自身的属性（等同 lstat）。 */
-  private async readDirectory(client: SFTPClient, path: string): Promise<{ filename: string; attrs: SFTPAttrs }[]> {
+  /**
+   * readDirectory 读出全部条目。READDIR 的属性是条目自身的属性（等同 lstat）。
+   *
+   * 与 list 不同，这里不截断而是**报错**：两个调用方（递归删除、清理上传残片）
+   * 只要拿到半份列表就会做错事——少读的条目没被删、旧残片没被清。
+   * 上限存在的理由同样是内存：一个百万文件的目录足以把 isolate 吃光。
+   */
+  private async readDirectory(
+    client: SFTPClient,
+    path: string,
+    limit: number = SFTPHandler.MAX_LIST_ENTRIES,
+  ): Promise<{ filename: string; attrs: SFTPAttrs }[]> {
     const handle = await client.openDir(path);
     const entries: { filename: string; attrs: SFTPAttrs }[] = [];
     try {
@@ -373,6 +502,9 @@ export class SFTPHandler implements ChannelHandler {
         if (!batch || batch.length === 0) break;
         for (const entry of batch) {
           if (entry.filename === '.' || entry.filename === '..') continue;
+          if (entries.length >= limit) {
+            throw new Error(`目录 ${path} 的条目超过 ${limit} 个，请改用终端处理`);
+          }
           entries.push({ filename: entry.filename, attrs: entry.attrs });
         }
       }
@@ -418,8 +550,8 @@ export class SFTPHandler implements ChannelHandler {
       throw new Error(`非法文件名：${filename}`);
     }
     // 声明的长度也要挡：前端拿到的 size 来自本地文件，但服务端不能假设它诚实。
-    if (size > SFTPHandler.MAX_UPLOAD_BYTES) {
-      throw new Error(`文件超过上传上限 ${SFTPHandler.MAX_UPLOAD_BYTES >> 20}MB`);
+    if (size > SFTPHandler.MAX_FILE_BYTES) {
+      throw new Error(`文件超过上传上限 ${SFTPHandler.MAX_FILE_BYTES >> 20}MB`);
     }
     const dir = remoteDir || '.';
     const finalPath = joinPath(dir, filename);
@@ -460,9 +592,9 @@ export class SFTPHandler implements ChannelHandler {
     }
     // size=0（未知长度）时上面那条闸不会响，这里用累计量兜底：
     // 否则一个「声明 0 字节」的上传可以无限写，直到把远端磁盘填满。
-    if (upload.offset + payload.byteLength > SFTPHandler.MAX_UPLOAD_BYTES) {
+    if (upload.offset + payload.byteLength > SFTPHandler.MAX_FILE_BYTES) {
       this.abortUpload();
-      throw new Error(`上传超过上限 ${SFTPHandler.MAX_UPLOAD_BYTES >> 20}MB，已中止（.part 已保留）`);
+      throw new Error(`上传超过上限 ${SFTPHandler.MAX_FILE_BYTES >> 20}MB，已中止（.part 已保留）`);
     }
     try {
       await client.writeFile(upload.handle, upload.offset, payload);
@@ -523,56 +655,44 @@ export class SFTPHandler implements ChannelHandler {
 
   // ===== 下载：响应先出，再分片推 =====
 
-  /** statSize 只取远端文件大小（HTTP Range 要先知道总长才能解析区间）。 */
-  async statSize(path: string): Promise<number> {
-    const client = this.requireClient();
-    const attrs = await client.stat(path);
-    const size = sizeOf(attrs);
-    if (size === null) throw new Error('无法读取远端文件大小');
-    return size;
-  }
-
-  /** download 打开远端文件并返回总大小与启动器。
-   *  响应必须先于数据帧发出（前端靠它定文件名与总大小），所以这里不自己开跑，
-   *  由调用方在写完响应之后调 start()。
-   *  startOffset / endOffset 供 HTTP Range 续传用：直接从该偏移开始推，不是「先读后丢」。
-   *  endOffset 是**闭区间**终点；不传就推到文件尾（WS 下载走这条）。 */
-  async download(
-    path: string,
-    startOffset = 0,
-    endOffset = Number.POSITIVE_INFINITY,
-  ): Promise<{ filename: string; total: number; start: () => void }> {
+  /**
+   * download 打开远端文件，返回文件名、总长与「开始推字节」的启动器。
+   *
+   * 响应头必须先于数据帧发出（前端靠它定文件名与总长），所以这里不自己开跑，
+   * 由调用方写完响应之后调 start()。stat 与 open 都在这一步做完：
+   * 大小既写进响应头，也决定推多少字节，不必再单独 stat 一次。
+   */
+  async download(path: string): Promise<{ filename: string; total: number; start: () => void }> {
     if (this.downloading) throw new Error('本通道已有下载在进行');
     // requireClient 同时覆盖了「通道还没就绪」：客户端只在子系统握手成功后才存在。
     const client = this.requireClient();
     const attrs = await client.stat(path);
+    // 目录大小在各家服务器上语义不一（0 / 4096 / 块数），当文件下发只会让人困惑。
+    if (isDirectory(attrs)) throw new Error('这是一个目录，不能按文件下载');
     const size = sizeOf(attrs);
     if (size === null) throw new Error('无法读取远端文件大小');
+    // 先判大小再开句柄：超过上限的文件不该占住一个远端文件句柄。
+    if (size > SFTPHandler.MAX_FILE_BYTES) {
+      throw new Error(`文件 ${formatMB(size)}，超过下载上限 ${SFTPHandler.MAX_FILE_BYTES >> 20}MB`);
+    }
     const handle = await client.openFile(path, SFTP_OPEN_FLAGS.READ);
     const filename = path.split('/').filter(Boolean).pop() ?? 'download';
-    const begin = Math.min(Math.max(Math.floor(startOffset) || 0, 0), size);
-    const last = Math.min(Math.floor(endOffset), size - 1);
     this.downloading = true;
     return {
       filename,
       total: size,
       start: () => {
-        void this.pumpDownload(client, handle, begin, size, last).finally(() => { this.downloading = false; });
+        void this.pumpDownload(client, handle, size - 1).finally(() => { this.downloading = false; });
       },
     };
   }
 
-  private async pumpDownload(
-    client: SFTPClient,
-    handle: Uint8Array,
-    begin: number,
-    size: number,
-    last: number,
-  ): Promise<void> {
+  /** pumpDownload 从 0 读到 last（闭区间）。空文件 last = -1，循环不进、直接补结束帧。 */
+  private async pumpDownload(client: SFTPClient, handle: Uint8Array, last: number): Promise<void> {
     try {
-      let offset = begin;
+      let offset = 0;
       while (offset <= last && !this.disposed) {
-        // 最后一片按区间截断：Range 请求不该多送一个字节，否则 Content-Length 就对不上。
+        // 最后一片按剩余字节截断：多送一个字节，Content-Length 就对不上。
         const want = Math.min(SFTPHandler.CHUNK_SIZE, last - offset + 1);
         const chunk = await client.readFile(handle, offset, want);
         if (!chunk || chunk.length === 0) break;
@@ -583,6 +703,12 @@ export class SFTPHandler implements ChannelHandler {
         offset += chunk.length;
       }
       if (this.disposed) return;
+      // 读到的比 stat 说的少（文件在传输途中被截断 / 日志轮转）：必须报错。
+      // 只补 END 的话，下游会收到一个长度不足却被标记为「传完了」的文件。
+      if (offset <= last) {
+        this.cb.error(`download: 远端文件在传输中变短（读到 ${offset} 字节，期望 ${last + 1} 字节）`);
+        return;
+      }
       // 最后一片带 FLAG_END：前端以此判定「传完了」。
       this.cb.data(new Uint8Array(0), true);
     } catch (error) {
@@ -619,134 +745,10 @@ interface UploadState {
   offset: number;
 }
 
-// ===== exec =====
-
-/** ExecHandler 一路非交互命令：收集 stdout/stderr 与退出码。 */
-export class ExecHandler implements ChannelHandler {
-  private channel: SSHChannel | null = null;
-  // stdout 与 stderr 是两条独立的流，各自留一个解码器。
-  // 共用一个的话，stdout 尾部那段「半个多字节字符」会被拼到 stderr 的开头上。
-  private readonly stdoutDecoder = new TextDecoder();
-  private readonly stderrDecoder = new TextDecoder();
-  private stdout = '';
-  private stderr = '';
-  private stdoutBytes = 0;
-  private stderrBytes = 0;
-  private stdoutTruncated = false;
-  private stderrTruncated = false;
-  private exitStatus: number | null = null;
-  private finished = false;
-
-  constructor(
-    private readonly conn: SSHConnection,
-    private readonly command: string,
-    private readonly maxBytes: number,
-    private readonly done: (result: ExecResult) => void,
-  ) {}
-
-  async onOpened(channel: SSHChannel): Promise<void> {
-    this.channel = channel;
-    await this.conn.sendEncrypted(buildExecRequest(channel, this.command));
-  }
-
-  async onRequestResult(success: boolean): Promise<void> {
-    if (!success) this.finish('服务器拒绝了 exec 请求');
-  }
-
-  onData(chunk: Uint8Array): void {
-    this.append('out', chunk);
-  }
-
-  onExtendedData(chunk: Uint8Array): void {
-    this.append('err', chunk);
-  }
-
-  private append(stream: 'out' | 'err', chunk: Uint8Array): void {
-    const used = stream === 'out' ? this.stdoutBytes : this.stderrBytes;
-    if (used >= this.maxBytes) {
-      this.markTruncated(stream);
-      return;
-    }
-    const slice = chunk.subarray(0, Math.min(chunk.length, this.maxBytes - used));
-    if (slice.length < chunk.length) this.markTruncated(stream);
-    // 只解自己那条流的解码器：多字节字符被 TCP 分片切断时，剩下的半个要留在原流里等下一片。
-    const decoder = stream === 'out' ? this.stdoutDecoder : this.stderrDecoder;
-    const text = decoder.decode(slice, { stream: true });
-    if (stream === 'out') {
-      this.stdout += text;
-      this.stdoutBytes += slice.length;
-    } else {
-      this.stderr += text;
-      this.stderrBytes += slice.length;
-    }
-  }
-
-  private markTruncated(stream: 'out' | 'err'): void {
-    if (stream === 'out') this.stdoutTruncated = true;
-    else this.stderrTruncated = true;
-  }
-
-  onEof(): void { /* 等 CLOSE */ }
-
-  onClose(): void {
-    this.finish();
-  }
-
-  onOpenFailure(message: string): void {
-    this.finish(message);
-  }
-
-  onExitStatus(status: number): void {
-    this.exitStatus = status;
-  }
-
-  onWindowAdjust(): void { /* exec 只收不发 */ }
-
-  private finish(failure?: string): void {
-    if (this.finished) return;
-    this.finished = true;
-    // 把两条流里各自残留的半个多字节字符吐出来（decode() 无参 = 结束流）。
-    this.stdout += this.stdoutDecoder.decode();
-    this.stderr += this.stderrDecoder.decode();
-    this.done({
-      stdout: this.stdout,
-      stderr: failure ?? this.stderr,
-      exitStatus: this.exitStatus,
-      stdoutTruncated: this.stdoutTruncated,
-      stderrTruncated: this.stderrTruncated,
-    });
-  }
-}
-
-export interface ExecResult {
-  stdout: string;
-  stderr: string;
-  exitStatus: number | null;
-  /** 输出被 maxBytes 截断过；调用方据此补一行提示，避免用户以为命令只输出了这些。 */
-  stdoutTruncated?: boolean;
-  stderrTruncated?: boolean;
-}
-
 // ===== 通道无关的小工具 =====
 
-/** buildExecRequest 自己拼 exec 请求。
- *  vendored 的 SSHChannel.buildExecRequest 会拒绝含换行的命令，而 managi 的批量命令
- *  正是「多条命令按换行连成一段脚本、在同一个 shell 里顺序执行」，必须允许换行。
- */
-function buildExecRequest(channel: SSHChannel, command: string): Uint8Array {
-  const commandBytes = new TextEncoder().encode(command);
-  if (commandBytes.length === 0) throw new Error('执行命令为空');
-  if (commandBytes.length > 64 * 1024) throw new Error('执行命令过长');
-  const name = encodeString('exec');
-  const field = encodeString(commandBytes);
-  const payload = new Uint8Array(1 + 4 + name.length + 1 + field.length);
-  let offset = 0;
-  payload[offset++] = SSH_MSG_CHANNEL_REQUEST;
-  writeUint32(payload, offset, channel.getRemoteChannelID());
-  offset += 4;
-  payload.set(name, offset);
-  offset += name.length;
-  payload[offset++] = 0x01;
-  payload.set(field, offset);
-  return payload;
+/** formatMB 把字节数说成人能看懂的大小（512KB / 10.4MB）。 */
+function formatMB(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 }

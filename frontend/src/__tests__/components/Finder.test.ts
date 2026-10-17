@@ -15,7 +15,6 @@ const mockStatus = ref<ConnectionStatus>('connected')
 const mockList = vi.fn(() => Promise.resolve())
 const mockUpload = vi.fn(() => Promise.resolve())
 const mockDownload = vi.fn(() => Promise.resolve())
-const mockDownloadViaHTTP = vi.fn(() => Promise.resolve())
 const mockMkdir = vi.fn(() => Promise.resolve())
 const mockDel = vi.fn(() => Promise.resolve())
 const mockClose = vi.fn()
@@ -31,7 +30,6 @@ vi.mock('@/composables/useSFTP', () => ({
     list: mockList,
     upload: mockUpload,
     download: mockDownload,
-    downloadViaHTTP: mockDownloadViaHTTP,
     mkdir: mockMkdir,
     del: mockDel,
     close: mockClose,

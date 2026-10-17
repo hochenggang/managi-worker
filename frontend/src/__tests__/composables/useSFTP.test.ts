@@ -8,19 +8,14 @@ import { createFakeHub } from '../helpers/fakeHub'
 // 链路层（握手/重连/seq 关联/帧路由）由 useWSHub.test.ts 覆盖，
 // 这里只验字节流的组织方式：占位、切片、续传、进度与落定信号。
 
-const { mockHandleError, mockDownloadWithRange, hubRef } = vi.hoisted(() => ({
+const { mockHandleError, hubRef } = vi.hoisted(() => ({
   mockHandleError: vi.fn(),
-  mockDownloadWithRange: vi.fn(),
   hubRef: { hub: null as any },
 }))
 
 vi.mock('@/helper', async (importActual) => ({
   ...(await importActual<typeof import('@/helper')>()),
   handleError: mockHandleError,
-}))
-
-vi.mock('@/api', () => ({
-  downloadWithRange: mockDownloadWithRange,
 }))
 
 // 只替换取单例的入口，uiStatus 保持真实实现
@@ -71,24 +66,9 @@ async function settleAutoList(chan: FakeChannel, path: string): Promise<void> {
 const file = (name: string, size: number, mtime = 0) =>
   new File([new Uint8Array(size)], name, { lastModified: mtime })
 
-/** 打桩 File System Access：happy-dom 没有 showSaveFilePicker，测试里按需给一个。 */
-function stubPicker(impl: (() => Promise<any>) | undefined): void {
-  Object.defineProperty(window, 'showSaveFilePicker', { value: impl, configurable: true, writable: true })
-}
-
-const streamOf = (sizes: number[]) =>
-  new ReadableStream<Uint8Array>({
-    start(c) {
-      sizes.forEach((n) => c.enqueue(new Uint8Array(n)))
-      c.close()
-    },
-  })
-
 describe('useSFTP', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockDownloadWithRange.mockReset()
-    stubPicker(undefined)
     fake = createFakeHub()
     hubRef.hub = fake
   })
@@ -154,6 +134,13 @@ describe('useSFTP', () => {
     expect(chan.lastRequest('rm').data).toEqual({ path: '/home/user/hosts', chan: 1 })
     chan.lastRequest('rm').ok({ path: '/home/user/hosts' })
     await d
+  })
+
+  it('upload：文件超过 10MB 直接拒绝，连请求都不发', async () => {
+    const { s, chan } = mountSFTP()
+    await settleAutoList(chan, '/home/user')
+    await expect(s.upload('/remote', file('big.bin', 11 * 1024 * 1024))).rejects.toThrow('10MB')
+    expect(chan.requests.some((r) => r.type === 'upload')).toBe(false)
   })
 
   it('upload：请求 → 按服务端 chunk_size 分帧 → 空帧 FLAG_END → upload_end 落定', async () => {
@@ -293,6 +280,14 @@ describe('useSFTP', () => {
     expect(s.downloadProgress.value).toBe(0)
   })
 
+  it('download：文件超过 10MB 直接拒绝，连请求都不发', async () => {
+    const { s, chan } = mountSFTP()
+    await settleAutoList(chan, '/home/user')
+    await expect(s.download('/remote/huge.iso', 11 * 1024 * 1024)).rejects.toThrow('10MB')
+    // 没有开一次白跑的通道往返
+    expect(chan.requests.some((r) => r.type === 'download')).toBe(false)
+  })
+
   it('download 未启动时到达的数据帧被丢弃，不污染进度', () => {
     const { s, chan } = mountSFTP()
     chan.push(new Uint8Array([1, 2, 3]))
@@ -342,92 +337,5 @@ describe('useSFTP', () => {
     expect(chan.lastRequest('ls').data).toEqual({ path: '/var/log', chan: 5 })
     await settleAutoList(chan, '/var/log')
     expect(s.currentPath.value).toBe('/var/log')
-  })
-
-  it('downloadViaHTTP：分块读取流并按字节数推进度', async () => {
-    const { s } = mountSFTP()
-    const chunks = [new Uint8Array(50), new Uint8Array(50)]
-    let i = 0
-    mockDownloadWithRange.mockResolvedValue({
-      total: 100,
-      stream: new ReadableStream<Uint8Array>({
-        pull(c) {
-          if (i < chunks.length) c.enqueue(chunks[i++])
-          else c.close()
-        },
-      }),
-    })
-    await s.downloadViaHTTP('/big.bin')
-    expect(s.downloadProgress.value).toBe(100)
-  })
-
-  it('downloadViaHTTP 失败时复位进度，不残留半截数字', async () => {
-    const { s } = mountSFTP()
-    mockDownloadWithRange.mockResolvedValue({
-      total: 100,
-      stream: new ReadableStream<Uint8Array>({
-        start(c) {
-          c.enqueue(new Uint8Array(50))
-        },
-        pull() {
-          throw new Error('network interrupted')
-        },
-      }),
-    })
-    await expect(s.downloadViaHTTP('/big.bin')).rejects.toThrow('network interrupted')
-    expect(s.downloadProgress.value).toBe(0)
-  })
-
-  // 有 File System Access 就逐块写盘：GB 级文件不该先变成浏览器内存里的一个 Blob
-  it('downloadViaHTTP：走磁盘写入，不缓冲整份文件', async () => {
-    const { s } = mountSFTP()
-    const written: number[] = []
-    const writable = {
-      write: vi.fn(async (c: Uint8Array) => {
-        written.push(c.byteLength)
-      }),
-      close: vi.fn(),
-      abort: vi.fn(),
-    }
-    const picker = vi.fn(async () => ({ createWritable: async () => writable }))
-    stubPicker(picker)
-    mockDownloadWithRange.mockResolvedValue({ total: 100, stream: streamOf([50, 50]) })
-
-    await s.downloadViaHTTP('/dir/big.bin')
-    expect(picker).toHaveBeenCalledWith({ suggestedName: 'big.bin' })
-    expect(written).toEqual([50, 50])
-    expect(writable.close).toHaveBeenCalledTimes(1)
-    expect(writable.abort).not.toHaveBeenCalled()
-    expect(s.downloadProgress.value).toBe(100)
-  })
-
-  // 取消保存框是用户意愿，不该变成一次失败的下载，更不该再去拉数据
-  it('downloadViaHTTP：用户取消保存框则静默结束', async () => {
-    const { s } = mountSFTP()
-    stubPicker(async () => {
-      throw Object.assign(new Error('canceled'), { name: 'AbortError' })
-    })
-    await expect(s.downloadViaHTTP('/big.bin')).resolves.toBeUndefined()
-    expect(mockDownloadWithRange).not.toHaveBeenCalled()
-    expect(s.downloadProgress.value).toBe(0)
-  })
-
-  // 写盘失败必须 abort()：否则半截文件会被当成完整的一份留在盘上
-  it('downloadViaHTTP 写盘失败：abort 丢弃半成品并复位进度', async () => {
-    const { s } = mountSFTP()
-    const writable = {
-      write: vi.fn(async (c: Uint8Array) => {
-        if (c.byteLength > 40) throw new Error('disk full')
-      }),
-      close: vi.fn(),
-      abort: vi.fn(async () => {}),
-    }
-    stubPicker(async () => ({ createWritable: async () => writable }))
-    mockDownloadWithRange.mockResolvedValue({ total: 100, stream: streamOf([40, 60]) })
-
-    await expect(s.downloadViaHTTP('/big.bin')).rejects.toThrow('disk full')
-    expect(writable.abort).toHaveBeenCalledTimes(1)
-    expect(writable.close).not.toHaveBeenCalled()
-    expect(s.downloadProgress.value).toBe(0)
   })
 })

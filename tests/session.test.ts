@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  ExecHandler,
   PTYHandler,
   SFTPHandler,
   SSHAuthDefectError,
@@ -8,7 +7,6 @@ import {
   describeConnectFailure,
   negotiateMac,
   type ChannelCallbacks,
-  type ExecResult,
 } from '../src/session';
 import type { SSHChannel } from '../src/ssh/channel';
 import type { SFTPAttrs } from '../src/ssh/sftp';
@@ -101,147 +99,6 @@ function readField(bytes: Uint8Array, offset: number): { value: string; next: nu
   const value = new TextDecoder().decode(bytes.subarray(offset + 4, offset + 4 + length));
   return { value, next: offset + 4 + length };
 }
-
-// ===== ExecHandler =====
-
-describe('ExecHandler', () => {
-  const CHANNEL_REQUEST = 98;
-
-  function make(command: string, maxBytes = 4096) {
-    const connection = conn();
-    const results: ExecResult[] = [];
-    const handler = new ExecHandler(asConn(connection), command, maxBytes, (result) => results.push(result));
-    return { connection, results, handler };
-  }
-
-  it('打开通道时发出 exec 请求，通道号与命令都在报文里', async () => {
-    const { connection, handler } = make('echo hi');
-    const ch = channel({ remoteChannelID: 5 });
-    await handler.onOpened(asChannel(ch));
-
-    const payload = connection.sentEncrypted[0]!;
-    expect(payload[0]).toBe(CHANNEL_REQUEST);
-    expect(new DataView(payload.buffer, payload.byteOffset).getUint32(1)).toBe(5);
-    const name = readField(payload, 5);
-    expect(name.value).toBe('exec');
-    expect(payload[name.next]).toBe(0x01); // want-reply
-    expect(readField(payload, name.next + 1).value).toBe('echo hi');
-  });
-
-  it('允许换行的命令 —— 批量命令正是「多行脚本在同一个 shell 里顺序跑」', async () => {
-    const { connection, handler } = make('cd /tmp\nls -la\nexit 0');
-    await handler.onOpened(asChannel(channel()));
-    const payload = connection.sentEncrypted[0]!;
-    const name = readField(payload, 5);
-    expect(readField(payload, name.next + 1).value).toBe('cd /tmp\nls -la\nexit 0');
-  });
-
-  it('空命令直接拒绝', async () => {
-    const { handler } = make('');
-    await expect(handler.onOpened(asChannel(channel()))).rejects.toThrow('执行命令为空');
-  });
-
-  it('超过 64KB 的命令拒绝', async () => {
-    const { handler } = make('x'.repeat(64 * 1024 + 1));
-    await expect(handler.onOpened(asChannel(channel()))).rejects.toThrow('执行命令过长');
-  });
-
-  it('收集 stdout / stderr 与退出码，通道关闭时了结', async () => {
-    const { results, handler } = make('cmd');
-    handler.onData(text('第一行\n第二行\n'));
-    handler.onExtendedData(text('警告\n'));
-    handler.onExitStatus(3);
-    handler.onClose();
-    expect(results).toHaveLength(1);
-    expect(results[0]).toEqual({
-      stdout: '第一行\n第二行\n',
-      stderr: '警告\n',
-      exitStatus: 3,
-      stdoutTruncated: false,
-      stderrTruncated: false,
-    });
-  });
-
-  it('只了结一次（onClose 之后再来的都没用）', () => {
-    const { results, handler } = make('cmd');
-    handler.onClose();
-    handler.onOpenFailure('服务器拒绝了 exec 请求');
-    expect(results).toHaveLength(1);
-  });
-
-  it('exec 请求被拒时把原因写进 stderr', () => {
-    const { results, handler } = make('cmd');
-    handler.onOpenFailure('服务器拒绝了 exec 请求');
-    expect(results[0]!.stderr).toBe('服务器拒绝了 exec 请求');
-    expect(results[0]!.exitStatus).toBeNull();
-  });
-
-  it('onRequestResult(false) 也当作请求被拒', async () => {
-    const { results, handler } = make('cmd');
-    await handler.onRequestResult(false);
-    expect(results[0]!.stderr).toBe('服务器拒绝了 exec 请求');
-  });
-
-  it('onEof 不提前了结（还要等 CLOSE 才知道输出收完了）', () => {
-    const { results, handler } = make('cmd');
-    handler.onData(text('partial'));
-    handler.onEof();
-    expect(results).toHaveLength(0);
-    handler.onClose();
-    expect(results[0]!.stdout).toBe('partial');
-  });
-
-  it('stdout 超过上限时截断并标记（提示由调用方补，不混进 error）', () => {
-    const { results, handler } = make('cmd', 10);
-    handler.onData(new Uint8Array(4));
-    handler.onData(new Uint8Array(100));
-    handler.onClose();
-    expect(results[0]!.stdoutTruncated).toBe(true);
-    expect(results[0]!.stderrTruncated).toBe(false);
-  });
-
-  it('stderr 超过上限时独立截断（两条流各有各的额度）', () => {
-    const { results, handler } = make('cmd', 5);
-    handler.onData(text('stdout 部分'));
-    handler.onExtendedData(text('stderr 部分'));
-    handler.onClose();
-    expect(results[0]!.stdoutTruncated).toBe(true);
-    expect(results[0]!.stderrTruncated).toBe(true);
-    expect(results[0]!.stdout).toBe('stdou');
-    expect(results[0]!.stderr.length).toBeGreaterThan(0);
-  });
-
-  it('已超限之后继续来的数据不再累加，只是重复标记', () => {
-    const { results, handler } = make('cmd', 3);
-    handler.onData(text('abc'));
-    handler.onData(text('def'));
-    handler.onClose();
-    expect(results[0]!.stdout).toBe('abc');
-  });
-
-  it('多字节字符被分片切断时能正确拼回（stdout 与 stderr 各留各的半个）', () => {
-    const { results, handler } = make('cmd');
-    const emoji = text('😀'); // 4 字节
-    handler.onData(emoji.subarray(0, 2));
-    handler.onExtendedData(text('err'));
-    handler.onData(emoji.subarray(2));
-    handler.onClose();
-    expect(results[0]!.stdout).toBe('😀');
-    expect(results[0]!.stderr).toBe('err');
-  });
-
-  it('onExitStatus 可以在 onClose 之前任意时刻到达', () => {
-    const { results, handler } = make('cmd');
-    handler.onClose();
-    expect(results[0]!.exitStatus).toBeNull();
-
-    const second = make('cmd');
-    second.handler.onExitStatus(0);
-    second.handler.onWindowAdjust();
-    second.handler.onClose();
-    expect(second.results[0]!.exitStatus).toBe(0);
-  });
-});
 
 // ===== PTYHandler =====
 
@@ -546,6 +403,26 @@ describe('SFTPHandler', () => {
     await expect(handler.remove('/d0')).rejects.toThrow(`目录层级超过 ${SFTPHandler.MAX_REMOVE_DEPTH} 层`);
   });
 
+  it('目录条目超过上限时递归删除直接报错（半份列表会删漏东西）', async () => {
+    const { handler } = await ready();
+    const limit = SFTPHandler.MAX_LIST_ENTRIES;
+    client.tree.set('/big', Array.from({ length: limit + 1 }, (_, index) => ({
+      filename: `f${index}`,
+      attrs: fileAttrs(1),
+    })));
+    await expect(handler.remove('/big')).rejects.toThrow(`目录 /big 的条目超过 ${limit} 个`);
+  });
+
+  it('目标目录条目过多时上传照旧进行（清残片是尽力而为，不该挡住上传）', async () => {
+    const { handler } = await ready();
+    const limit = SFTPHandler.MAX_LIST_ENTRIES;
+    client.tree.set('/huge', Array.from({ length: limit + 1 }, (_, index) => ({
+      filename: `f${index}`,
+      attrs: fileAttrs(1),
+    })));
+    await expect(handler.beginUpload('/huge', 'a.txt', 1, 1)).resolves.toMatchObject({ offset: 0 });
+  });
+
   it('mkdir -p：绝对路径逐级创建，已存在的层级跳过', async () => {
     const { handler } = await ready();
     client.stats.set('/a', dirAttrs());
@@ -640,8 +517,8 @@ describe('SFTPHandler', () => {
     const { handler } = await ready();
     client.stats.set('.', dirAttrs());
     await expect(
-      handler.beginUpload('', 'huge.iso', SFTPHandler.MAX_UPLOAD_BYTES + 1, 0),
-    ).rejects.toThrow(`文件超过上传上限 ${SFTPHandler.MAX_UPLOAD_BYTES >> 20}MB`);
+      handler.beginUpload('', 'huge.iso', SFTPHandler.MAX_FILE_BYTES + 1, 0),
+    ).rejects.toThrow(`文件超过上传上限 ${SFTPHandler.MAX_FILE_BYTES >> 20}MB`);
     // 连 .part 都不该建
     expect(client.openedFiles).toHaveLength(0);
   });
@@ -767,6 +644,20 @@ describe('SFTPHandler', () => {
     expect(download.filename).toBe('download');
   });
 
+  it('下载：超过 10MB 直接拒绝，且不去开远端文件句柄', async () => {
+    const { handler } = await ready();
+    client.stats.set('/tmp/huge.iso', attrs({ size: SFTPHandler.MAX_FILE_BYTES + 1, permissions: FILE_MODE }));
+    await expect(handler.download('/tmp/huge.iso')).rejects.toThrow('超过下载上限 10MB');
+    expect(client.openedFiles).toHaveLength(0);
+  });
+
+  it('下载：刚好 10MB 仍可下载（边界是「大于」不是「大于等于」）', async () => {
+    const { handler } = await ready();
+    client.stats.set('/tmp/exact.bin', attrs({ size: SFTPHandler.MAX_FILE_BYTES, permissions: FILE_MODE }));
+    const download = await handler.download('/tmp/exact.bin');
+    expect(download.total).toBe(SFTPHandler.MAX_FILE_BYTES);
+  });
+
   it('下载：拿不到大小时明确报错', async () => {
     const { handler } = await ready();
     client.stats.set('/tmp/weird', attrs({ permissions: FILE_MODE }));
@@ -784,30 +675,27 @@ describe('SFTPHandler', () => {
     expect(rec.errors).toEqual([]);
   });
 
-  it('下载：给了起始偏移就从该偏移推（HTTP Range 续传，不是先读后丢）', async () => {
+  it('下载：文件在传输途中变短时报错（不能把短一截的内容当完整文件交出去）', async () => {
     const { handler, rec } = await ready();
-    client.files.set('/tmp/f.bin', new Uint8Array(10));
-    const download = await handler.download('/tmp/f.bin', 4);
+    // stat 说有 10 字节，实际只读得到 4 字节 —— 日志轮转 / 被截断就是这个样子
+    client.files.set('/tmp/f.bin', new Uint8Array(4));
+    client.stats.set('/tmp/f.bin', attrs({ size: 10, permissions: FILE_MODE }));
+    const download = await handler.download('/tmp/f.bin');
     expect(download.total).toBe(10);
     download.start();
-    await waitFor(() => rec.data.some((item) => item.end), '续传结束帧');
-    expect(rec.data[0]!.bytes).toBe(6);
+    await waitFor(() => rec.errors.length > 0, '变短错误');
+    expect(rec.errors[0]).toContain('传输中变短');
+    expect(rec.data.every((item) => !item.end)).toBe(true);
   });
 
-  it('下载：偏移超出文件大小时从文件尾开始（等于一个空响应）', async () => {
+  it('下载：空文件只补一个结束帧（0 字节也要正常收尾）', async () => {
     const { handler, rec } = await ready();
-    client.files.set('/tmp/f.bin', new Uint8Array(4));
-    const download = await handler.download('/tmp/f.bin', 999);
+    client.files.set('/tmp/f.bin', new Uint8Array(0));
+    const download = await handler.download('/tmp/f.bin');
+    expect(download.total).toBe(0);
     download.start();
     await waitFor(() => rec.data.some((item) => item.end), '空下载结束帧');
     expect(rec.data).toEqual([{ bytes: 0, end: true }]);
-  });
-
-  it('下载：负数偏移归零', async () => {
-    const { handler } = await ready();
-    client.files.set('/tmp/f.bin', new Uint8Array(4));
-    const download = await handler.download('/tmp/f.bin', -5);
-    expect(download.total).toBe(4);
   });
 
   it('下载：读失败时报错但**不补结束帧**（前端据此判失败，而不是当着传完了）', async () => {
@@ -938,7 +826,7 @@ describe('SSHConnection 的对外契约', () => {
       { ended: () => undefined, verifyHostKey: async () => ({ ok: true }) },
     );
     expect(connection.isReady()).toBe(false);
-    expect(() => connection.openExec(new ExecHandler(connection, 'x', 10, () => undefined)))
+    expect(() => connection.openSFTP(new SFTPHandler(connection, record().callbacks)))
       .toThrow('SSH 连接尚未就绪');
   });
 

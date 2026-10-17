@@ -9,7 +9,6 @@
             "add": "添加节点",
             "edit": "编辑",
             "delete": "删除",
-            "batch": "批量执行",
             "settings": "设置"
         }
     },
@@ -70,7 +69,17 @@
         "confirmAddShortcut": "确定",
         "cancelShortCut": "取消",
         "executeCommand": "开始执行",
-        "executing": "执行中...",
+        "stop": "停止",
+        "executing": "执行中…",
+        "queued": "排队中",
+        "done": "已完成",
+        "failed": "失败",
+        "cancelled": "已取消",
+        "exitCode": "退出码",
+        "unknownCode": "未收到退出码（命令可能被中断）",
+        "serverTruncated": "输出超过 4 MB，服务端只转发了前 4 MB",
+        "displayTrimmed": "输出过长，此处只显示前 256 KB",
+        "parallelHint": "同时执行 {n} 台",
         "addNodeToContinue": "添加一个节点以继续",
         "noCmd": "输入框里面似乎没东西，无法保存为快捷命令",
         "shortcutNameRequired": "请输入快捷命令名称",
@@ -83,6 +92,25 @@
         "copied": "已复制",
         "copyError": "复制失败",
         "copy": "复制"
+    },
+    "quickCommand": {
+        "searchPlaceholder": "搜索命令...",
+        "noResult": "无匹配命令",
+        "cmds": {
+            "systemInfo": "系统信息",
+            "cpu": "CPU",
+            "memory": "内存",
+            "disk": "磁盘",
+            "process": "进程",
+            "uptime": "运行时间",
+            "ip": "IP 地址",
+            "route": "路由",
+            "ping": "Ping",
+            "ports": "端口",
+            "findLargeFiles": "大文件",
+            "tailLog": "日志尾部",
+            "grep": "文本搜索"
+        }
     },
     "xtermPanel": {
         "finder": "文件管理",
@@ -135,25 +163,6 @@
         "terminal": "终端",
         "sftp": "文件管理",
         "settings": "设置"
-    },
-    "quickCommand": {
-        "searchPlaceholder": "搜索命令...",
-        "noResult": "无匹配命令",
-        "cmds": {
-            "systemInfo": "系统信息",
-            "cpu": "CPU",
-            "memory": "内存",
-            "disk": "磁盘",
-            "process": "进程",
-            "uptime": "运行时间",
-            "ip": "IP 地址",
-            "route": "路由",
-            "ping": "Ping",
-            "ports": "端口",
-            "findLargeFiles": "大文件",
-            "tailLog": "日志尾部",
-            "grep": "文本搜索"
-        }
     },
     "settings": {
         "appearance": {

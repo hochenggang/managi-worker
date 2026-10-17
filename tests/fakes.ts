@@ -46,6 +46,10 @@ export class FakeChannel {
     return this.record('shell', '');
   }
 
+  buildExecRequest(command: string): Uint8Array {
+    return this.record('exec', command);
+  }
+
   buildSubsystemRequest(subsystem: string): Uint8Array {
     return this.record('subsystem', subsystem);
   }
@@ -175,33 +179,6 @@ export interface FakeCallbacks {
   failed(message: string): void;
 }
 
-/** FakeExecHandler 记录被要求执行的命令，并让用例自己决定何时给出结果。 */
-export class FakeExecHandler {
-  static readonly created: FakeExecHandler[] = [];
-  static reset(): void {
-    FakeExecHandler.created.length = 0;
-  }
-
-  readonly command: string;
-  readonly maxBytes: number;
-
-  constructor(
-    _conn: unknown,
-    command: string,
-    maxBytes: number,
-    private readonly done: (result: unknown) => void,
-  ) {
-    this.command = command;
-    this.maxBytes = maxBytes;
-    FakeExecHandler.created.push(this);
-  }
-
-  /** finish 模拟命令跑完。 */
-  finish(result: unknown): void {
-    this.done(result);
-  }
-}
-
 /** FakePTYHandler 只关心「输入有没有交到 SSH 层」与「怎么宣布就绪」。 */
 export class FakePTYHandler {
   static readonly OUT_FRAME = 32 * 1024;
@@ -234,6 +211,32 @@ export class FakePTYHandler {
 
   queueInput(payload: Uint8Array): void {
     this.inputs.push(payload);
+  }
+}
+
+/** FakeExecHandler 只关心「命令有没有交给 SSH 层」与「输出闸门什么时候打开」。 */
+export class FakeExecHandler {
+  static readonly MAX_STREAM_BYTES = 4 * 1024 * 1024;
+  static readonly created: FakeExecHandler[] = [];
+  static reset(): void {
+    FakeExecHandler.created.length = 0;
+  }
+
+  /** start() 被调用时给出这路通道攒下的输出（正常是空的：响应先出）。 */
+  started = 0;
+
+  constructor(
+    _conn: unknown,
+    readonly command: string,
+    readonly cb: FakeCallbacks,
+  ) {
+    FakeExecHandler.created.push(this);
+    // 真实实现在 CHANNEL_SUCCESS 之后宣布就绪；替身直接宣布。
+    queueMicrotask(() => this.cb.ready());
+  }
+
+  start(): void {
+    this.started += 1;
   }
 }
 
@@ -278,6 +281,10 @@ function applyPlan(target: object, plan: object): void {
 export class FakeSFTPHandler {
   static readonly CHUNK_SIZE = 64 * 1024;
   static readonly WINDOW = 1024 * 1024;
+  // 与真实实现同值：hello 会把这几项发给前端，替身缺了它们就会漏字段。
+  static readonly MAX_LIST_ENTRIES = 10_000;
+  static readonly MAX_REMOVE_DEPTH = 64;
+  static readonly MAX_FILE_BYTES = 10 * 1024 * 1024;
 
   static readonly created: FakeSFTPHandler[] = [];
   /** 下一个实例要套用的配置；用例在发请求前设置。 */
@@ -291,8 +298,7 @@ export class FakeSFTPHandler {
   readonly mkdirCalls: string[] = [];
   readonly removeCalls: string[] = [];
   readonly uploadCalls: Array<{ dir: string; filename: string; size: number; mtime: number }> = [];
-  readonly downloadCalls: Array<{ path: string; offset: number; endOffset?: number }> = [];
-  readonly statSizeCalls: string[] = [];
+  readonly downloadCalls: Array<{ path: string }> = [];
   readonly written: Uint8Array[] = [];
 
   /** 目录操作的返回值 / 抛错，用例按需设置。 */
@@ -357,19 +363,9 @@ export class FakeSFTPHandler {
     return this.finishUploadSize;
   }
 
-  /** statSize 与真实现对齐：Range 解析要先知道总长。 */
-  async statSize(path: string): Promise<number> {
-    this.statSizeCalls.push(path);
-    if (this.downloadError) throw this.downloadError;
-    return this.downloadMeta.total;
-  }
-
-  async download(
-    path: string,
-    offset = 0,
-    endOffset = Number.POSITIVE_INFINITY,
-  ): Promise<{ filename: string; total: number; start: () => void }> {
-    this.downloadCalls.push({ path, offset, endOffset });
+  /** stat + open 都在 download 这一步完成，与真实现一致。 */
+  async download(path: string): Promise<{ filename: string; total: number; start: () => void }> {
+    this.downloadCalls.push({ path });
     if (this.downloadError) throw this.downloadError;
     const meta = this.downloadMeta;
     return {

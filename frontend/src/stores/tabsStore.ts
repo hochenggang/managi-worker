@@ -1,5 +1,5 @@
 // Pinia store：全局多标签页管理。
-// 允许批量执行、终端、SFTP、设置等视图以独立标签同时存在；
+// 允许终端、SFTP、设置等视图以独立标签同时存在；
 // 通过保留所有标签组件实例实现连接后台保活。
 
 import { defineStore } from 'pinia'
@@ -83,16 +83,18 @@ export const useTabsStore = defineStore('tabs', () => {
     })
   }
 
-  function openBatch(): TabItem {
-    return openSingleton('batch')
-  }
-
   function openTerminal(node: ApiNode): TabItem {
     return openNodeTab('terminal', node)
   }
 
   function openSftp(node: ApiNode): TabItem {
     return openNodeTab('sftp', node)
+  }
+
+  // 批量命令是整页共用的一个工作面：多个批量标签没有意义，
+  // 反而会让人以为「这个标签里选中的节点」和「那个标签里的」是两套状态。
+  function openBatch(): TabItem {
+    return openSingleton('batch')
   }
 
   function openSettings(): TabItem {
@@ -127,9 +129,9 @@ export const useTabsStore = defineStore('tabs', () => {
     activeTab,
     activate,
     add,
-    openBatch,
     openTerminal,
     openSftp,
+    openBatch,
     openSettings,
     close,
     closeOthers,
